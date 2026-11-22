@@ -252,12 +252,64 @@ class TestPitAuditPro(unittest.TestCase):
             # Đúng 4 sheet chuẩn mẫu TK, 05-1, 05-2, 05-3 + DS_NPT_TMS + DoiChieu_NPT
             for s in ("TK", "05-1", "05-2", "05-3", "DS_NPT_TMS", "DoiChieu_NPT"):
                 self.assertIn(s, wb.sheetnames)
-            # Đối chiếu trực tiếp trên sheet 05-3 (cột L..S, dòng 4)
+            # Đối chiếu trực tiếp trên sheet 05-3 (cột L..V, dòng 4)
             ws_053 = wb["05-3"]
             self.assertEqual(ws_053["L4"].value, 12)
-            self.assertEqual(ws_053["P4"].value, 6)
-            self.assertEqual(ws_053["Q4"].value, "=MAX(0,L4-P4)")
-            self.assertIn("VƯỢT THỜI GIAN ĐĂNG KÝ", str(ws_053["S4"].value))
+            self.assertEqual(ws_053["M4"].value, 6)  # 2024 - 2018 = 6 tuổi
+            self.assertIn("Hợp lệ", str(ws_053["N4"].value))
+            self.assertEqual(ws_053["O4"].value, "Không trùng")
+            self.assertEqual(ws_053["S4"].value, 6)
+            self.assertEqual(ws_053["T4"].value, "=MAX(0,L4-S4)")
+            self.assertIn("VƯỢT THỜI GIAN ĐĂNG KÝ", str(ws_053["V4"].value))
+
+    def test_v12_dependent_age_and_duplicate_checks(self) -> None:
+        """Kiểm thử v1.2: Kiểm tra độ tuổi NPT (con <18 / 18-22 / >22 / trước tháng sinh; cha mẹ trong/ngoài tuổi LĐ) và trùng NPT (cùng NNT, nhiều NNT trên 05-3, trùng trên TMS)."""
+        from npt_tms_engine import TmsNptRow, audit_dependents
+        from xml_05qtt_parser import Row053
+        import datetime
+
+        rows_053 = [
+            # 1. Con 20 tuổi (2024 - 2004 = 20t) -> Cảnh báo KT thẻ SV
+            Row053(1, "Nguyễn A", "8000000001", "Nguyễn Con Lớn", "15/05/2004", "8900000001", "CCCD", "079204000001", "Con", "01/2024", "12/2024"),
+            # 2. Con sinh 08/2024 nhưng khai từ 01/2024 -> KHAI TRƯỚC THÁNG SINH
+            Row053(2, "Nguyễn A", "8000000001", "Nguyễn Bé Mới", "10/08/2024", "8900000002", "GKS", "", "Con", "01/2024", "12/2024"),
+            # 3. Cha 50 tuổi (sinh 1974) -> TRONG ĐỘ TUỔI LAO ĐỘNG
+            Row053(3, "Trần B", "8000000002", "Trần Văn Cha", "01/01/1974", "8900000003", "CCCD", "079074000003", "Cha/Mẹ", "01/2024", "12/2024"),
+            # 4. Mẹ 58 tuổi (sinh 1966, tên đệm Thị) -> Nữ ngoài tuổi LĐ 2024 (>= 56.3t) -> Hợp lệ độ tuổi
+            Row053(4, "Trần B", "8000000002", "Lê Thị Mẹ", "01/01/1966", "8900000004", "CCCD", "079166000004", "Cha/Mẹ", "01/2024", "12/2024"),
+            # 5 & 6. Trùng NPT giữa 2 NNT khác nhau trên 05-3 (vợ & chồng cùng khai 1 con 8900000005)
+            Row053(5, "Lê Chồng", "8000000003", "Lê Bé Chung", "01/03/2019", "8900000005", "CCCD", "079219000005", "Con", "01/2024", "12/2024"),
+            Row053(6, "Phạm Vợ", "8000000004", "Lê Bé Chung", "01/03/2019", "8900000005", "CCCD", "079219000005", "Con", "06/2024", "12/2024"),
+            # 7. Trùng đăng ký với NNT khác trên TMS (8000000099 đang đăng ký 8900000007 trên TMS)
+            Row053(7, "Hoàng E", "8000000005", "Hoàng Bé Bảy", "02/02/2020", "8900000007", "CCCD", "079220000007", "Con", "01/2024", "12/2024"),
+        ]
+
+        tms_rows = [
+            TmsNptRow("01.01.2023", "01.01.2023", "8000000005", "Hoàng E", "8900000007", "Hoàng Bé Bảy", "Đang hoạt động", "00", "02.02.2020", "079220000007", "", "Con", (2023, 1), None, "16-TH", "", datetime.date(2023, 1, 1)),
+            TmsNptRow("01.01.2024", "01.01.2024", "8000000099", "NNT Khác", "8900000007", "Hoàng Bé Bảy", "Đang hoạt động", "00", "02.02.2020", "079220000007", "", "Con", (2024, 1), None, "16-TH", "", datetime.date(2024, 1, 1)),
+        ]
+
+        res, _ = audit_dependents(rows_053, tms_rows, tax_year=2024)
+        # Kiểm tra độ tuổi
+        self.assertFalse(res[0].is_age_ok)
+        self.assertIn("18–22 tuổi", res[0].age_status)
+        self.assertFalse(res[1].is_age_ok)
+        self.assertIn("KHAI TRƯỚC THÁNG SINH", res[1].age_status)
+        self.assertFalse(res[2].is_age_ok)
+        self.assertIn("TRONG ĐỘ TUỔI LAO ĐỘNG", res[2].age_status)
+        self.assertTrue(res[3].is_age_ok)
+        self.assertIn("Nữ ngoài độ tuổi lao động", res[3].age_status)
+
+        # Kiểm tra trùng NPT trên 05-3 (rows 5 & 6)
+        self.assertTrue(res[4].is_dup)
+        self.assertIn("TRÙNG NHIỀU NNT TRÊN 05-3", res[4].dup_status)
+        self.assertTrue(res[5].is_dup)
+        self.assertIn("8000000003", res[5].dup_status)
+
+        # Kiểm tra trùng NPT với NNT khác trên TMS (row 7)
+        self.assertTrue(res[6].is_dup)
+        self.assertIn("TRÙNG NNT KHÁC TRÊN TMS", res[6].dup_status)
+        self.assertIn("8000000099", res[6].dup_status)
 
 
 if __name__ == "__main__":

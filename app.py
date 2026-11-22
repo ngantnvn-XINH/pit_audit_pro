@@ -340,7 +340,8 @@ class PitAuditProApp:
                         for yr, st in sorted(stats_by_year.items()):
                             lines.append(
                                 f"• Năm {yr}: Tổng {st['total_rows']} dòng | Khớp: {st['matched']} | "
-                                f"Chênh lệch: {st['issues']} | Loại trừ: {st['total_diff_months']} tháng ({st['total_disallowed_amount']:,.0f} đ)"
+                                f"Cảnh báo độ tuổi: {st.get('age_warnings', 0)} | Trùng NPT: {st.get('duplicates', 0)} | "
+                                f"Loại trừ TMS: {st['total_diff_months']} tháng ({st['total_disallowed_amount']:,.0f} đ)"
                             )
                     messagebox.showinfo("Hoàn tất", "\n".join(lines))
                     if open_after:

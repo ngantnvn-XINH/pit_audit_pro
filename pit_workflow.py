@@ -111,7 +111,8 @@ def reconcile_053_inplace(
     if "05-3" not in wb.sheetnames:
         raise ValueError("Workbook không có sheet '05-3' để đối chiếu Người phụ thuộc.")
 
-    _write_tms_sheet(wb, tms_rows)
+    if tms_rows:
+        _write_tms_sheet(wb, tms_rows)
     ws_053 = wb["05-3"]
 
     # Đọc toàn bộ dòng dữ liệu từ sheet '05-3' (giữ đúng số dòng gốc)
@@ -151,9 +152,9 @@ def reconcile_053_inplace(
         )
 
     policy = get_policy_for_year(detected_year)
-    results, _ = audit_dependents(parsed_053, tms_rows)
+    results, _ = audit_dependents(parsed_053, tms_rows, tax_year=detected_year)
 
-    # ===== GHI TRỰC TIẾP 8 CỘT ĐỐI CHIẾU (L..S) NGAY TRÊN SHEET '05-3' =====
+    # ===== GHI TRỰC TIẾP 11 CỘT ĐỐI CHIẾU (L..V) NGAY TRÊN SHEET '05-3' =====
     f_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
     f_code = Font(name="Calibri", size=9, italic=True, color="1F4E78")
     f_reg = Font(name="Calibri", size=9)
@@ -172,11 +173,10 @@ def reconcile_053_inplace(
     al_r = Alignment(horizontal="right", vertical="center")
     NUM = "#,##0"
 
-    # Nếu đã merge L1:S1 trước đó thì tránh merge trùng
-    if "L1:S1" not in [str(m) for m in ws_053.merged_cells.ranges]:
-        ws_053.merge_cells("L1:S1")
-    ws_053["L1"] = "ĐỐI CHIẾU NGƯỜI PHỤ THUỘC VỚI HỆ THỐNG TMS"
-    for cc in range(12, 20):
+    if "L1:V1" not in [str(m) for m in ws_053.merged_cells.ranges]:
+        ws_053.merge_cells("L1:V1")
+    ws_053["L1"] = "ĐỐI CHIẾU NGƯỜI PHỤ THUỘC (ĐỘ TUỔI • TRÙNG ĐĂNG KÝ • HỆ THỐNG TMS)"
+    for cc in range(12, 23):
         c1 = ws_053.cell(1, cc)
         c1.font = f_hdr
         c1.fill = fill_hdr
@@ -185,13 +185,16 @@ def reconcile_053_inplace(
 
     col_defs = [
         (12, "Số tháng\n05-3", "[DC1]"),
-        (13, "Từ tháng\n(TMS)", "[DC2]"),
-        (14, "Đến tháng\n(TMS)", "[DC3]"),
-        (15, "Trạng thái MST NPT\n(TMS)", "[DC4]"),
-        (16, "Số tháng\nhợp lệ (TMS)", "[DC5]"),
-        (17, "Số tháng\nchênh lệch", "[DC6]"),
-        (18, "Tiền giảm trừ\nloại trừ (đồng)", "[DC7]"),
-        (19, "Kết quả đối chiếu", "[DC8]"),
+        (13, "Tuổi\nNPT", "[DC2]"),
+        (14, "Kiểm tra độ tuổi\n(TT 111 & BLLĐ)", "[DC3]"),
+        (15, "Kiểm tra trùng NPT\n(05-3 & TMS)", "[DC4]"),
+        (16, "Từ tháng\n(TMS)", "[DC5]"),
+        (17, "Đến tháng\n(TMS)", "[DC6]"),
+        (18, "Trạng thái MST NPT\n(TMS)", "[DC7]"),
+        (19, "Số tháng\nhợp lệ (TMS)", "[DC8]"),
+        (20, "Số tháng\nchênh lệch", "[DC9]"),
+        (21, "Tiền giảm trừ\nloại trừ (đồng)", "[DC10]"),
+        (22, "Kết quả đối chiếu\ntổng hợp", "[DC11]"),
     ]
     for cc, title, code in col_defs:
         c2 = ws_053.cell(2, cc, title)
@@ -208,37 +211,51 @@ def reconcile_053_inplace(
 
     matched_cnt = 0
     issue_cnt = 0
+    age_warn_cnt = 0
+    dup_cnt = 0
     total_diff_months = 0
     issue_items: List[Tuple[int, Any]] = []
 
     for r_idx, res in zip(row_indices, results):
         ws_053.cell(r_idx, 12, res.decl_months).alignment = al_c
-        ws_053.cell(r_idx, 13, res.tms_from).alignment = al_c
-        ws_053.cell(r_idx, 14, res.tms_to).alignment = al_c
-        ws_053.cell(r_idx, 15, res.tms_status).alignment = al_l
-        ws_053.cell(r_idx, 16, res.valid_months).alignment = al_c
-        ws_053.cell(r_idx, 17, f"=MAX(0,L{r_idx}-P{r_idx})").alignment = al_c
-        ws_053.cell(r_idx, 18, f"=Q{r_idx}*'{SHEET_NPT_SUMMARY}'!$C$4").alignment = al_r
-        ws_053.cell(r_idx, 18).number_format = NUM
-        ws_053.cell(r_idx, 19, res.status).alignment = al_l
+        ws_053.cell(r_idx, 13, res.age if res.age is not None else "").alignment = al_c
+        ws_053.cell(r_idx, 14, res.age_status).alignment = al_l
+        ws_053.cell(r_idx, 15, res.dup_status).alignment = al_l
+        ws_053.cell(r_idx, 16, res.tms_from).alignment = al_c
+        ws_053.cell(r_idx, 17, res.tms_to).alignment = al_c
+        ws_053.cell(r_idx, 18, res.tms_status).alignment = al_l
+        ws_053.cell(r_idx, 19, res.valid_months).alignment = al_c
+        ws_053.cell(r_idx, 20, f"=MAX(0,L{r_idx}-S{r_idx})").alignment = al_c
+        ws_053.cell(r_idx, 21, f"=T{r_idx}*'{SHEET_NPT_SUMMARY}'!$C$4").alignment = al_r
+        ws_053.cell(r_idx, 21).number_format = NUM
+        ws_053.cell(r_idx, 22, res.status).alignment = al_l
+
+        if not res.is_age_ok:
+            age_warn_cnt += 1
+        if res.is_dup:
+            dup_cnt += 1
 
         if res.is_ok:
             matched_cnt += 1
             r_fill = fill_ok
         else:
             issue_cnt += 1
-            r_fill = fill_err if res.disallowed_months > 0 else fill_warn
+            r_fill = fill_err if (res.disallowed_months > 0 or res.is_dup) else fill_warn
             issue_items.append((r_idx, res))
         total_diff_months += res.disallowed_months
 
-        for cc in range(12, 20):
+        for cc in range(12, 23):
             cell = ws_053.cell(r_idx, cc)
-            cell.font = f_bold if cc == 19 else f_reg
+            cell.font = f_bold if cc in (15, 22) else f_reg
             cell.border = b_thin
-            if cc in (17, 18, 19):
+            if cc == 14:
+                cell.fill = fill_ok if res.is_age_ok else fill_warn
+            elif cc == 15:
+                cell.fill = fill_err if res.is_dup else fill_ok
+            elif cc in (20, 21, 22):
                 cell.fill = r_fill
 
-    for cc, w in {12: 11, 13: 12, 14: 13, 15: 28, 16: 12, 17: 12, 18: 18, 19: 34}.items():
+    for cc, w in {12: 10, 13: 8, 14: 30, 15: 28, 16: 11, 17: 12, 18: 26, 19: 11, 20: 11, 21: 17, 22: 36}.items():
         ws_053.column_dimensions[get_column_letter(cc)].width = w
 
     # ===== TẠO SHEET TỔNG HỢP 'DoiChieu_NPT' =====
@@ -255,13 +272,13 @@ def reconcile_053_inplace(
     fill_ctrl = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
     fill_input = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
 
-    ws_dc.merge_cells("A1:N1")
-    ws_dc["A1"] = f"BẢNG TỔNG HỢP ĐỐI CHIẾU NGƯỜI PHỤ THUỘC (05-3 vs TMS) — NĂM {policy.year}"
+    ws_dc.merge_cells("A1:P1")
+    ws_dc["A1"] = f"BẢNG TỔNG HỢP ĐỐI CHIẾU NGƯỜI PHỤ THUỘC (ĐỘ TUỔI • TRÙNG NPT • TMS) — NĂM {policy.year}"
     ws_dc["A1"].font = f_title
     ws_dc["A1"].alignment = al_c
     ws_dc.row_dimensions[1].height = 24
 
-    ws_dc.merge_cells("A2:N2")
+    ws_dc.merge_cells("A2:P2")
     ws_dc["A2"] = f"(Căn cứ: {policy.legal_basis} | Mức giảm trừ NPT mặc định: {policy.dependent_deduction_monthly:,} đ/tháng)"
     ws_dc["A2"].font = f_sub
     ws_dc["A2"].alignment = al_c
@@ -270,16 +287,18 @@ def reconcile_053_inplace(
     last_r = max(row_indices) if row_indices else 4
     kpi_rows = [
         (4, "Mức giảm trừ gia cảnh NPT (đồng/tháng — sửa ô vàng để cập nhật toàn bộ):", policy.dependent_deduction_monthly, True),
-        (5, "Tổng số dòng NPT kê khai trên bảng kê 05-3:", f"=COUNTA('05-3'!S4:S{last_r})", False),
-        (6, "Số dòng KHỚP hoàn toàn với hệ thống TMS:", f'=COUNTIF(\'05-3\'!S4:S{last_r},"KHỚP")', False),
-        (7, "Số dòng PHÁT HIỆN CHÊNH LỆCH / CẦN KIỂM TRA:", f'=COUNTIF(\'05-3\'!S4:S{last_r},"<>KHỚP")-COUNTBLANK(\'05-3\'!S4:S{last_r})', False),
-        (8, "Tổng số tháng giảm trừ chênh lệch (không đủ điều kiện):", f"=SUM('05-3'!Q4:Q{last_r})", False),
-        (9, "Tổng số tiền giảm trừ NPT không đủ điều kiện (đồng):", f"=SUM('05-3'!R4:R{last_r})", False),
+        (5, "Tổng số dòng NPT kê khai trên bảng kê 05-3:", f"=COUNTA('05-3'!V4:V{last_r})", False),
+        (6, "Số dòng KHỚP hoàn toàn (Độ tuổi • Không trùng • TMS):", f'=COUNTIF(\'05-3\'!V4:V{last_r},"KHỚP")', False),
+        (7, "Số dòng PHÁT HIỆN CHÊNH LỆCH / CẢNH BÁO:", f'=COUNTIF(\'05-3\'!V4:V{last_r},"<>KHỚP")-COUNTBLANK(\'05-3\'!V4:V{last_r})', False),
+        (8, "Trong đó — Số dòng CẢNH BÁO ĐỘ TUỔI NPT:", age_warn_cnt, False),
+        (9, "Trong đó — Số dòng PHÁT HIỆN TRÙNG ĐĂNG KÝ NPT:", dup_cnt, False),
+        (10, "Tổng số tháng giảm trừ chênh lệch (theo TMS):", f"=SUM('05-3'!T4:T{last_r})", False),
+        (11, "Tổng số tiền giảm trừ NPT không đủ điều kiện (đồng):", f"=SUM('05-3'!U4:U{last_r})", False),
     ]
     for r_k, lbl, val, is_inp in kpi_rows:
         ws_dc.row_dimensions[r_k].height = 20
         ws_dc.merge_cells(start_row=r_k, start_column=1, end_row=r_k, end_column=2)
-        ws_dc.cell(r_k, 1, lbl).font = f_tb if (is_inp or r_k == 9) else f_tr
+        ws_dc.cell(r_k, 1, lbl).font = f_tb if (is_inp or r_k == 11) else f_tr
         ws_dc.cell(r_k, 1).alignment = al_l
         for cc in (1, 2):
             ws_dc.cell(r_k, cc).fill = fill_ctrl
@@ -288,83 +307,93 @@ def reconcile_053_inplace(
         c_v.font = f_tb
         c_v.number_format = NUM
         c_v.alignment = al_r
-        c_v.fill = fill_input if is_inp else (fill_err if r_k in (7, 8, 9) else fill_ok)
+        c_v.fill = fill_input if is_inp else (fill_err if r_k in (7, 9, 10, 11) else (fill_warn if r_k == 8 else fill_ok))
         c_v.border = b_thin
 
-    ws_dc.merge_cells("A11:N11")
-    ws_dc["A11"] = "DANH SÁCH CHI TIẾT CÁC TRƯỜNG HỢP CHÊNH LỆCH / CẦN KIỂM TRA HỒ SƠ NPT"
-    ws_dc["A11"].font = f_sec
-    ws_dc.row_dimensions[11].height = 22
+    ws_dc.merge_cells("A13:P13")
+    ws_dc["A13"] = "DANH SÁCH CHI TIẾT CÁC TRƯỜNG HỢP CHÊNH LỆCH / CẢNH BÁO ĐỘ TUỔI / TRÙNG NPT"
+    ws_dc["A13"].font = f_sec
+    ws_dc.row_dimensions[13].height = 22
 
     dc_hdrs = [
         "STT", "Dòng 05-3", "Họ tên NNT", "MST NNT", "Họ tên NPT", "MST NPT",
-        "Số giấy tờ", "Từ tháng\n(05-3)", "Đến tháng\n(05-3)", "Từ tháng\n(TMS)",
-        "Đến tháng\n(TMS)", "Số tháng\nchênh lệch", "Tiền giảm trừ\nloại trừ (đồng)", "Nội dung chênh lệch / Cảnh báo",
+        "Ngày sinh", "Tuổi", "Quan hệ", "Từ – Đến\n(05-3)", "Từ – Đến\n(TMS)",
+        "Kiểm tra độ tuổi", "Kiểm tra trùng NPT", "Số tháng\nchênh lệch",
+        "Tiền giảm trừ\nloại trừ (đồng)", "Kết quả đối chiếu tổng hợp",
     ]
-    ws_dc.row_dimensions[12].height = 26
+    ws_dc.row_dimensions[14].height = 26
     for cc, h in enumerate(dc_hdrs, start=1):
-        c = ws_dc.cell(12, cc, h)
+        c = ws_dc.cell(14, cc, h)
         c.font = f_hdr
         c.fill = fill_hdr
         c.alignment = al_c
         c.border = b_thin
 
     if not issue_items:
-        ws_dc.merge_cells("A13:N13")
-        ws_dc["A13"] = "Toàn bộ Người phụ thuộc trên bảng kê 05-3 đều KHỚP 100% với dữ liệu hệ thống TMS."
-        ws_dc["A13"].font = f_tb
-        ws_dc["A13"].alignment = al_c
-        ws_dc["A13"].fill = fill_ok
-        for cc in range(1, 15):
-            ws_dc.cell(13, cc).border = b_thin
+        ws_dc.merge_cells("A15:P15")
+        ws_dc["A15"] = "Toàn bộ Người phụ thuộc trên bảng kê 05-3 đều hợp lệ về độ tuổi, không trùng lặp và khớp 100% với hệ thống TMS."
+        ws_dc["A15"].font = f_tb
+        ws_dc["A15"].alignment = al_c
+        ws_dc["A15"].fill = fill_ok
+        for cc in range(1, 17):
+            ws_dc.cell(15, cc).border = b_thin
     else:
         for idx_i, (r_src, res) in enumerate(issue_items, start=1):
-            rr = 12 + idx_i
+            rr = 14 + idx_i
             s = res.src
-            ws_dc.row_dimensions[rr].height = 20
+            ws_dc.row_dimensions[rr].height = 22
             vals = [
                 idx_i, r_src, s.ho_ten_nnt, s.mst_nnt, s.ho_ten_npt, s.mst_npt,
-                s.so_gt, s.tu_thang, s.den_thang, res.tms_from, res.tms_to,
-                f"='05-3'!Q{r_src}", f"='05-3'!R{r_src}", res.status,
+                s.ngay_sinh, res.age if res.age is not None else "", s.quan_he,
+                f"{s.tu_thang} - {s.den_thang}".strip(" -"),
+                f"{res.tms_from} - {res.tms_to}".strip(" -"),
+                res.age_status, res.dup_status,
+                f"='05-3'!T{r_src}", f"='05-3'!U{r_src}", res.status,
             ]
             for cc, v in enumerate(vals, start=1):
                 c = ws_dc.cell(rr, cc, v)
                 c.font = f_tr
                 c.border = b_thin
-                if cc in (4, 6, 7):
+                if cc in (4, 6):
                     c.number_format = "@"
                     c.alignment = al_l
-                elif cc in (1, 2, 8, 9, 10, 11, 12):
+                elif cc in (1, 2, 7, 8, 9, 10, 11, 14):
                     c.alignment = al_c
-                elif cc == 13:
+                elif cc == 15:
                     c.number_format = NUM
                     c.alignment = al_r
                 else:
                     c.alignment = al_l
-                if cc in (12, 13, 14):
-                    c.fill = fill_err if res.disallowed_months > 0 else fill_warn
+                if cc == 12 and not res.is_age_ok:
+                    c.fill = fill_warn
+                elif cc == 13 and res.is_dup:
+                    c.fill = fill_err
+                elif cc in (14, 15, 16):
+                    c.fill = fill_err if (res.disallowed_months > 0 or res.is_dup) else fill_warn
 
-        r_tot = 12 + len(issue_items) + 1
+        r_tot = 14 + len(issue_items) + 1
         ws_dc.row_dimensions[r_tot].height = 22
-        ws_dc.merge_cells(start_row=r_tot, start_column=1, end_row=r_tot, end_column=11)
+        ws_dc.merge_cells(start_row=r_tot, start_column=1, end_row=r_tot, end_column=13)
         ws_dc.cell(r_tot, 1, "TỔNG CỘNG").alignment = al_c
-        ws_dc.cell(r_tot, 12, f"=SUM(L13:L{r_tot - 1})").alignment = al_c
-        ws_dc.cell(r_tot, 13, f"=SUM(M13:M{r_tot - 1})").alignment = al_r
-        ws_dc.cell(r_tot, 13).number_format = NUM
-        for cc in range(1, 15):
+        ws_dc.cell(r_tot, 14, f"=SUM(N15:N{r_tot - 1})").alignment = al_c
+        ws_dc.cell(r_tot, 15, f"=SUM(O15:O{r_tot - 1})").alignment = al_r
+        ws_dc.cell(r_tot, 15).number_format = NUM
+        for cc in range(1, 17):
             c = ws_dc.cell(r_tot, cc)
             c.font = f_tb
             c.fill = fill_code
             c.border = b_thin
 
-    for cc, w in enumerate([6, 10, 24, 14, 24, 14, 15, 11, 11, 11, 12, 12, 18, 36], start=1):
+    for cc, w in enumerate([6, 9, 22, 13, 22, 13, 11, 7, 10, 16, 16, 28, 28, 11, 17, 36], start=1):
         ws_dc.column_dimensions[get_column_letter(cc)].width = w
-    ws_dc.freeze_panes = "A13"
+    ws_dc.freeze_panes = "A15"
 
     return {
         "total_rows": len(parsed_053),
         "matched": matched_cnt,
         "issues": issue_cnt,
+        "age_warnings": age_warn_cnt,
+        "duplicates": dup_cnt,
         "total_diff_months": total_diff_months,
         "total_disallowed_amount": total_diff_months * policy.dependent_deduction_monthly,
     }
@@ -462,14 +491,13 @@ def export_yearly_tncn_with_audit(
         # 1. Xuất đúng 4 sheet chuẩn mẫu tax_xml_to_excel: TK, 05-1, 05-2, 05-3
         write_single_year_tncn_file(out_path, d)
 
-        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 (và thêm QuetRuiRo_ChiPhi nếu có sổ chi tiết)
-        if tms_rows or (ledger_sum and ledger_sum.flagged_entries):
-            wb = openpyxl.load_workbook(out_path)
-            if tms_rows and "05-3" in wb.sheetnames:
-                stats_by_year[yr] = reconcile_053_inplace(wb, tms_rows, tax_year=d.year)
-            if ledger_sum and ledger_sum.flagged_entries:
-                _append_cost_risk_sheet(wb, ledger_sum.flagged_entries)
-            wb.save(out_path)
+        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 (luôn chạy kiểm tra độ tuổi & trùng NPT, kể cả khi chưa nạp TMS)
+        wb = openpyxl.load_workbook(out_path)
+        if "05-3" in wb.sheetnames:
+            stats_by_year[yr] = reconcile_053_inplace(wb, tms_rows, tax_year=d.year)
+        if ledger_sum and ledger_sum.flagged_entries:
+            _append_cost_risk_sheet(wb, ledger_sum.flagged_entries)
+        wb.save(out_path)
 
         created_files.append(out_path)
 
