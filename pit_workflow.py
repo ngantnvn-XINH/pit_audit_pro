@@ -22,7 +22,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from excel_exporter import filter_latest_per_year, write_single_year_tncn_file
-from ledger_payroll_scanner import FlaggedCostEntry, scan_accounting_ledgers
+from ledger_payroll_scanner import FlaggedCostEntry, LedgerAuditSummary, scan_accounting_ledgers_by_year
 from npt_tms_engine import TmsNptRow, audit_dependents, parse_tms_npt_file, parse_ym
 from pit_tax_rules import get_policy_for_year
 from tax_parser import TaxDeclaration
@@ -451,18 +451,83 @@ def _append_cost_risk_sheet(wb: openpyxl.Workbook, flagged: List[FlaggedCostEntr
     ws.freeze_panes = "A2"
 
 
+def _append_payroll_reconcile_sheet(wb: openpyxl.Workbook, yr: int, ls: LedgerAuditSummary) -> None:
+    sname = "DoiChieu_QuyLuong_334"
+    if sname in wb.sheetnames:
+        del wb[sname]
+    ws = wb.create_sheet(title=sname)
+    ws.views.sheetView[0].showGridLines = True
+
+    f_title = Font(name="Times New Roman", size=12, bold=True, color="1F4E78")
+    f_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
+    f_reg = Font(name="Calibri", size=9)
+    f_bold = Font(name="Calibri", size=9, bold=True)
+    fill_hdr = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    thin = Side(style="thin", color="000000")
+    b_thin = Border(left=thin, right=thin, top=thin, bottom=thin)
+    al_c = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    al_l = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    al_r = Alignment(horizontal="right", vertical="center")
+
+    ws.merge_cells("A1:F1")
+    ws["A1"] = f"ĐỐI CHIẾU QUỸ LƯƠNG (TK 334), BẢO HIỂM (TK 338) & THUẾ TNCN (TK 3335) — NĂM {yr}"
+    ws["A1"].font = f_title
+    ws["A1"].alignment = al_c
+    ws.row_dimensions[1].height = 24
+
+    hdrs = ["STT", "Chỉ tiêu đối chiếu", "Số liệu trên Sổ kế toán", "Số liệu trên 05/QTT-TNCN (TK)", "Chênh lệch (Sổ KT - TK)", "Ghi chú nghiệp vụ"]
+    ws.row_dimensions[3].height = 24
+    for ci, h in enumerate(hdrs, start=1):
+        c = ws.cell(3, ci, h)
+        c.font = f_hdr
+        c.fill = fill_hdr
+        c.alignment = al_c
+        c.border = b_thin
+
+    has_tk = "TK" in wb.sheetnames
+    tnct_ref = "=TK!D41+TK!D43+TK!D45" if has_tk else 0
+    thue_ref = "=TK!D47" if has_tk else 0
+
+    rows_spec = [
+        (1, "Phát sinh Có TK 334 (Lương, thưởng phải trả) vs Tổng TNCT trên TK", round(ls.tk334_credit_total), tnct_ref, "Chênh lệch thường do lương tháng 12 chi trả sang năm sau hoặc khoản không chịu thuế"),
+        (2, "Phát sinh Nợ TK 334 (Thực chi trả NLĐ) vs Tổng TNCT trên TK", round(ls.tk334_debit_total), tnct_ref, "Thuế TNCN tính theo thời điểm thực chi trả (Khoản 2 Điều 8 TT 111/2013)"),
+        (3, "Bảo hiểm bắt buộc khấu trừ lương (TK 3383/3384/3386)", round(ls.tk338_insurance_total), 0, "Đối chiếu tổng BHXH/BHYT/BHTN phần NLĐ đóng trên 05-1"),
+        (4, "Thuế TNCN phải nộp phát sinh (Có TK 3335) vs Tổng thuế khấu trừ trên TK", round(ls.tk3335_credit_total), thue_ref, "Kiểm tra số thuế TNCN đã khấu trừ trên sổ sách khớp tờ khai QTT"),
+        (5, "Tổng chi Quỹ khen thưởng, phúc lợi (Nợ TK 353)", round(ls.tk353_debit_total), 0, "Rà soát các khoản chi phúc lợi đích danh cá nhân có nguy cơ bỏ sót TNCT"),
+    ]
+    for r_i, (stt, lbl, acc_v, tk_v, note) in enumerate(rows_spec, start=4):
+        ws.row_dimensions[r_i].height = 22
+        ws.cell(r_i, 1, stt).alignment = al_c
+        ws.cell(r_i, 2, lbl).alignment = al_l
+        ws.cell(r_i, 3, acc_v).number_format = "#,##0"
+        ws.cell(r_i, 3).alignment = al_r
+        ws.cell(r_i, 4, tk_v).number_format = "#,##0"
+        ws.cell(r_i, 4).alignment = al_r
+        ws.cell(r_i, 5, f"=C{r_i}-D{r_i}").number_format = "#,##0"
+        ws.cell(r_i, 5).alignment = al_r
+        ws.cell(r_i, 6, note).alignment = al_l
+        for ci in range(1, 7):
+            c = ws.cell(r_i, ci)
+            c.font = f_bold if ci == 5 else f_reg
+            c.border = b_thin
+
+    for ci, w in enumerate([6, 44, 20, 22, 20, 44], start=1):
+        ws.column_dimensions[get_column_letter(ci)].width = w
+
+
 def export_yearly_tncn_with_audit(
     declarations: List[TaxDeclaration],
     out_dir: str,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
     tms_npt_path: Optional[str] = None,
+    tms_npt_paths: Optional[Sequence[str]] = None,
     ledger_paths: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], Dict[int, Dict[str, Any]]]:
     """
     Lọc tờ khai TNCN theo khoảng [year_from .. year_to], chọn bản bổ sung cuối cùng mỗi năm
-    (kế thừa 05-3 từ lần trước), xuất từng file `QTT_TNCN_YYYY.xlsx` chuẩn mẫu `TK, 05-1, 05-2, 05-3`
-    và đối chiếu trực tiếp Người phụ thuộc trên sheet `05-3`.
+    (kế thừa 05-3 từ lần trước), xuất từng file `QTT_TNCN_YYYY.xlsx` chuẩn mẫu `TK, 05-1, 05-2, 05-3`,
+    đối chiếu trực tiếp Người phụ thuộc trên sheet `05-3` và tách đúng sổ chi tiết/bảng lương từng năm.
     """
     tncn_valid = []
     for d in declarations:
@@ -478,8 +543,23 @@ def export_yearly_tncn_with_audit(
         raise ValueError("Không tìm thấy tờ khai Quyết toán TNCN nào hợp lệ trong khoảng năm đã chọn.")
 
     latest_per_year = filter_latest_per_year(tncn_valid)
-    tms_rows = parse_tms_npt_file(tms_npt_path) if (tms_npt_path and os.path.isfile(tms_npt_path)) else []
-    ledger_sum = scan_accounting_ledgers(ledger_paths) if ledger_paths else None
+
+    # Gộp nhiều file TMS NPT nếu người dùng chọn nhiều file
+    all_tms_paths: List[str] = []
+    if tms_npt_path and os.path.isfile(tms_npt_path):
+        all_tms_paths.append(tms_npt_path)
+    if tms_npt_paths:
+        for tp in tms_npt_paths:
+            if tp and os.path.isfile(tp) and tp not in all_tms_paths:
+                all_tms_paths.append(tp)
+
+    tms_rows: List[TmsNptRow] = []
+    for tp in all_tms_paths:
+        tms_rows.extend(parse_tms_npt_file(tp))
+
+    # Quét sổ chi tiết & bảng lương tách theo từng năm
+    ledgers_by_year = scan_accounting_ledgers_by_year(ledger_paths) if ledger_paths else {}
+    undated_ledger = ledgers_by_year.get(None)
 
     os.makedirs(out_dir, exist_ok=True)
     created_files: List[str] = []
@@ -491,14 +571,22 @@ def export_yearly_tncn_with_audit(
         # 1. Xuất đúng 4 sheet chuẩn mẫu tax_xml_to_excel: TK, 05-1, 05-2, 05-3
         write_single_year_tncn_file(out_path, d)
 
-        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 (luôn chạy kiểm tra độ tuổi & trùng NPT, kể cả khi chưa nạp TMS)
+        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 + gắn đối chiếu quỹ lương & rủi ro chi phí của ĐÚNG NĂM đó
         wb = openpyxl.load_workbook(out_path)
         if "05-3" in wb.sheetnames:
             stats_by_year[yr] = reconcile_053_inplace(wb, tms_rows, tax_year=d.year)
-        if ledger_sum and ledger_sum.flagged_entries:
-            _append_cost_risk_sheet(wb, ledger_sum.flagged_entries)
-        wb.save(out_path)
 
+        yr_ledger = ledgers_by_year.get(yr)
+        yr_flagged: List[FlaggedCostEntry] = []
+        if yr_ledger:
+            _append_payroll_reconcile_sheet(wb, yr, yr_ledger)
+            yr_flagged.extend(yr_ledger.flagged_entries)
+        if undated_ledger and undated_ledger.flagged_entries:
+            yr_flagged.extend(undated_ledger.flagged_entries)
+        if yr_flagged:
+            _append_cost_risk_sheet(wb, yr_flagged)
+
+        wb.save(out_path)
         created_files.append(out_path)
 
     return created_files, stats_by_year

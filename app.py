@@ -22,18 +22,19 @@ from pit_workflow import export_yearly_tncn_with_audit, reconcile_existing_tncn_
 from tax_parser import TaxDeclaration, parse_tax_xml
 
 
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.3"
 
 
 class PitAuditProApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"PIT Audit Pro — Đối chiếu & Tính Thuế TNCN Chuyên sâu ({APP_VERSION})")
-        self.root.geometry("1120x690")
-        self.root.minsize(980, 580)
+        self.root.geometry("1140x760")
+        self.root.minsize(980, 640)
 
         self.declarations: List[TaxDeclaration] = []
         self.file_paths_set: set[str] = set()
+        self.tms_files: List[str] = []
         self.ledger_files: List[str] = []
 
         self._setup_style()
@@ -100,24 +101,40 @@ class PitAuditProApp:
             foreground="#555555",
         ).pack(side=tk.LEFT)
 
-        # 2. Chọn file Người phụ thuộc hệ thống TMS để đối chiếu trực tiếp trên 05-3
-        f_tms = ttk.LabelFrame(self.root, text="3. File Người phụ thuộc kết xuất từ TMS (.xlsx / .csv) — Đối chiếu trực tiếp trên sheet 05-3", padding=8)
+        # 2. Chọn 1 hoặc nhiều file Người phụ thuộc hệ thống TMS để đối chiếu trực tiếp trên 05-3
+        f_tms = ttk.LabelFrame(self.root, text="3. File Người phụ thuộc kết xuất từ TMS (.xlsx / .csv) — Hỗ trợ chọn nhiều file, đối chiếu trực tiếp trên 05-3", padding=8)
         f_tms.pack(fill=tk.X, padx=12, pady=4)
 
         self.var_tms_path = tk.StringVar(value="")
         ttk.Label(f_tms, text="File NPT TMS:").pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Entry(f_tms, textvariable=self.var_tms_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(f_tms, text="Chọn file NPT (.xlsx/.csv)...", command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(f_tms, text="Bỏ chọn", command=lambda: self.var_tms_path.set("")).pack(side=tk.LEFT)
+        ttk.Entry(f_tms, textvariable=self.var_tms_path, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ttk.Button(f_tms, text="Thêm file NPT (.xlsx/.csv)...", command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(f_tms, text="Xóa tất cả", command=self.clear_tms_files).pack(side=tk.LEFT)
 
-        # 3. Chọn thêm sổ chi tiết tài khoản chi phí (tùy chọn)
-        f_led = ttk.LabelFrame(self.root, text="4. Sổ chi tiết tài khoản chi phí (TK 334, 353, 641, 642, 622, 627...) — Tùy chọn quét rủi ro chi phí TNCN", padding=8)
+        # 3. Chọn nhiều file / cả thư mục Sổ chi tiết tài khoản & Bảng tính lương/thuế nhiều năm
+        f_led = ttk.LabelFrame(
+            self.root,
+            text="4. Sổ chi tiết tài khoản (TK 334, 353, 641, 642, 622, 627, 338, 3335...) & Bảng lương nhiều năm (tự động tách theo từng năm)",
+            padding=8,
+        )
         f_led.pack(fill=tk.X, padx=12, pady=4)
 
-        ttk.Button(f_led, text="Thêm sổ chi tiết (.xlsx)...", command=self.add_ledger_files).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(f_led, text="Xóa sổ chi tiết", command=self.clear_ledgers).pack(side=tk.LEFT, padx=(0, 8))
-        self.lbl_ledgers = ttk.Label(f_led, text="Chưa chọn file sổ chi tiết nào", font=("Segoe UI", 9, "italic"), foreground="#555555")
-        self.lbl_ledgers.pack(side=tk.LEFT)
+        led_btns = ttk.Frame(f_led)
+        led_btns.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(led_btns, text="Thêm nhiều file (.xlsx)...", command=self.add_ledger_files).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(led_btns, text="Chọn thư mục sổ chi tiết / bảng lương (quét cả thư mục con)...", command=self.add_ledger_folder).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(led_btns, text="Xóa mục đang chọn", command=self.remove_selected_ledgers).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(led_btns, text="Xóa tất cả", command=self.clear_ledgers).pack(side=tk.LEFT)
+        self.lbl_ledgers = ttk.Label(led_btns, text="Tổng: 0 file sổ chi tiết / bảng lương", font=("Segoe UI", 9, "bold"))
+        self.lbl_ledgers.pack(side=tk.RIGHT)
+
+        led_list_frame = ttk.Frame(f_led)
+        led_list_frame.pack(fill=tk.X)
+        self.lst_ledgers = tk.Listbox(led_list_frame, height=4, selectmode=tk.EXTENDED, font=("Segoe UI", 8))
+        led_sb = ttk.Scrollbar(led_list_frame, orient=tk.VERTICAL, command=self.lst_ledgers.yview)
+        self.lst_ledgers.configure(yscrollcommand=led_sb.set)
+        self.lst_ledgers.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        led_sb.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Bảng xem trước danh sách file XML TNCN
         tbl_frame = ttk.Frame(self.root, padding=(12, 4, 12, 4))
@@ -255,29 +272,64 @@ class PitAuditProApp:
         self.refresh_table()
 
     def pick_tms_file(self) -> None:
-        p = filedialog.askopenfilename(
-            title="Chọn file Người phụ thuộc kết xuất từ hệ thống TMS (.xlsx hoặc .csv)",
-            filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel Workbook", "*.xlsx"), ("CSV", "*.csv"), ("All files", "*.*")],
-        )
-        if p:
-            self.var_tms_path.set(os.path.normpath(p))
-
-    def add_ledger_files(self) -> None:
         paths = filedialog.askopenfilenames(
-            title="Chọn các file Excel sổ chi tiết tài khoản (TK 334, 353, 641, 642, 622, 627...)",
-            filetypes=[("Excel Workbook", "*.xlsx")],
+            title="Chọn 1 hoặc nhiều file Người phụ thuộc kết xuất từ hệ thống TMS (.xlsx hoặc .csv)",
+            filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel Workbook", "*.xlsx"), ("CSV", "*.csv"), ("All files", "*.*")],
         )
         for p in paths:
             norm = os.path.normpath(p)
+            if norm not in self.tms_files:
+                self.tms_files.append(norm)
+        if self.tms_files:
+            self.var_tms_path.set("; ".join(os.path.basename(x) for x in self.tms_files) + f" ({len(self.tms_files)} file)")
+
+    def clear_tms_files(self) -> None:
+        self.tms_files.clear()
+        self.var_tms_path.set("")
+
+    def _add_ledger_paths(self, paths: List[str]) -> None:
+        added = 0
+        for p in paths:
+            if not p.lower().endswith(".xlsx") or os.path.basename(p).startswith("~$"):
+                continue
+            norm = os.path.normpath(p)
             if norm not in self.ledger_files:
                 self.ledger_files.append(norm)
-        self.lbl_ledgers.config(
-            text=f"Đã chọn {len(self.ledger_files)} file sổ chi tiết" if self.ledger_files else "Chưa chọn file sổ chi tiết nào"
+                self.lst_ledgers.insert(tk.END, norm)
+                added += 1
+        self.lbl_ledgers.config(text=f"Tổng: {len(self.ledger_files)} file sổ chi tiết / bảng lương")
+        if added:
+            self.lbl_status.config(text=f"Đã thêm {added} file sổ chi tiết / bảng lương.")
+
+    def add_ledger_files(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Chọn nhiều file Excel sổ chi tiết tài khoản & bảng tính lương/thuế nhiều năm",
+            filetypes=[("Excel Workbook", "*.xlsx")],
         )
+        if paths:
+            self._add_ledger_paths(list(paths))
+
+    def add_ledger_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Chọn thư mục chứa sổ chi tiết tài khoản & bảng lương nhiều năm (quét cả thư mục con)")
+        if not folder:
+            return
+        found: List[str] = []
+        for root_dir, _, files in os.walk(folder):
+            for fn in files:
+                if fn.lower().endswith(".xlsx") and not fn.startswith("~$"):
+                    found.append(os.path.join(root_dir, fn))
+        self._add_ledger_paths(found)
+
+    def remove_selected_ledgers(self) -> None:
+        for idx in reversed(self.lst_ledgers.curselection()):
+            self.lst_ledgers.delete(idx)
+            del self.ledger_files[idx]
+        self.lbl_ledgers.config(text=f"Tổng: {len(self.ledger_files)} file sổ chi tiết / bảng lương")
 
     def clear_ledgers(self) -> None:
         self.ledger_files.clear()
-        self.lbl_ledgers.config(text="Chưa chọn file sổ chi tiết nào")
+        self.lst_ledgers.delete(0, tk.END)
+        self.lbl_ledgers.config(text="Tổng: 0 file sổ chi tiết / bảng lương")
 
     def refresh_table(self) -> None:
         for item in self.tree.get_children():
@@ -309,8 +361,7 @@ class PitAuditProApp:
             return
 
         y_from, y_to = self._get_year_bounds()
-        tms_path = self.var_tms_path.get().strip()
-        valid_tms = tms_path if (tms_path and os.path.isfile(tms_path)) else None
+        valid_tms_list = [p for p in self.tms_files if os.path.isfile(p)]
         ledgers = list(self.ledger_files)
         open_after = self.var_open_after.get()
 
@@ -326,7 +377,7 @@ class PitAuditProApp:
                     out_dir,
                     year_from=y_from,
                     year_to=y_to,
-                    tms_npt_path=valid_tms,
+                    tms_npt_paths=valid_tms_list,
                     ledger_paths=ledgers,
                 )
 
@@ -370,15 +421,18 @@ class PitAuditProApp:
         if not excel_path:
             return
 
-        tms_path = self.var_tms_path.get().strip()
-        if not tms_path or not os.path.isfile(tms_path):
+        tms_path = self.tms_files[0] if (self.tms_files and os.path.isfile(self.tms_files[0])) else ""
+        if not tms_path:
             tms_path = filedialog.askopenfilename(
                 title="Bước 2/2: Chọn file Người phụ thuộc kết xuất từ TMS (.xlsx / .csv)",
                 filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("All files", "*.*")],
             )
             if not tms_path:
                 return
-            self.var_tms_path.set(os.path.normpath(tms_path))
+            norm_t = os.path.normpath(tms_path)
+            if norm_t not in self.tms_files:
+                self.tms_files.append(norm_t)
+            self.var_tms_path.set("; ".join(os.path.basename(x) for x in self.tms_files) + f" ({len(self.tms_files)} file)")
 
         open_after = self.var_open_after.get()
         self.btn_export.config(state=tk.DISABLED)

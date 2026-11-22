@@ -56,6 +56,21 @@ def _fmt_date(val: Any) -> str:
     return _clean_text(val)
 
 
+def _extract_year(val: Any, fallback_text: str = "") -> Optional[int]:
+    if isinstance(val, (datetime.date, datetime.datetime)):
+        return val.year
+    s = _clean_text(val)
+    if s:
+        m = re.search(r"\b(20\d{2})\b", s)
+        if m:
+            return int(m.group(1))
+    if fallback_text:
+        m2 = re.search(r"\b(20\d{2})\b", fallback_text)
+        if m2:
+            return int(m2.group(1))
+    return None
+
+
 # 6 nhóm rủi ro chi phí chịu thuế TNCN thường bị bỏ sót ngoài bảng lương
 RISK_RULES: List[Tuple[str, str, str, Tuple[str, ...], float]] = [
     (
@@ -116,6 +131,7 @@ class FlaggedCostEntry:
     nhom_rui_ro: str
     muc_do: str
     can_cu_phap_ly: str
+    year: Optional[int] = None
 
 
 @dataclass
@@ -192,14 +208,23 @@ def _classify_risk(dien_giai: str, tk_no: str, tk_co: str, amount: float) -> Opt
     return None
 
 
-def scan_accounting_ledgers(file_paths: Sequence[str]) -> LedgerAuditSummary:
-    """Quét 1 hoặc nhiều file Excel sổ chi tiết tài khoản / bảng lương để tổng hợp TK 334/338/3335/353 và lọc rủi ro chi phí."""
-    summary = LedgerAuditSummary()
+def scan_accounting_ledgers_by_year(file_paths: Sequence[str]) -> Dict[Optional[int], LedgerAuditSummary]:
+    """
+    Quét nhiều file Excel sổ chi tiết tài khoản / bảng lương của nhiều năm,
+    tự động tách kết quả theo từng năm chứng từ (`year -> LedgerAuditSummary`)
+    để ghép chính xác vào từng file `QTT_TNCN_YYYY.xlsx`.
+    """
+    by_year: Dict[Optional[int], LedgerAuditSummary] = {}
+
+    def _bucket(yr: Optional[int]) -> LedgerAuditSummary:
+        if yr not in by_year:
+            by_year[yr] = LedgerAuditSummary()
+        return by_year[yr]
 
     for path in file_paths:
         if not path or not os.path.isfile(path):
             continue
-        summary.files_scanned.append(os.path.basename(path))
+        fname = os.path.basename(path)
         wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
         for sname in wb.sheetnames:
             ws = wb[sname]
@@ -210,9 +235,9 @@ def scan_accounting_ledgers(file_paths: Sequence[str]) -> LedgerAuditSummary:
             if hdr_idx is None:
                 continue
 
-            # Dò xem sheet/file này có phải sổ chi tiết riêng của 1 tài khoản (VD: tên sheet '334', '642', '3335')
-            m_sheet_tk = re.search(r"\b(334\d*|3335\d*|338[346]\d*|353\d*|641\d*|642\d*|622\d*|627\d*|154\d*|811\d*)\b", sname + " " + os.path.basename(path))
+            m_sheet_tk = re.search(r"\b(334\d*|3335\d*|338[346]\d*|353\d*|641\d*|642\d*|622\d*|627\d*|154\d*|811\d*)\b", sname + " " + fname)
             default_tk = m_sheet_tk.group(1) if m_sheet_tk else ""
+            fallback_yr_txt = f"{sname} {fname}"
 
             def _get(row: List[Any], key: str) -> Any:
                 ci = cmap.get(key)
@@ -235,36 +260,40 @@ def scan_accounting_ledgers(file_paths: Sequence[str]) -> LedgerAuditSummary:
                 if amt <= 0:
                     continue
 
-                # 1. Tổng hợp TK 334, 3383/3384/3386, 3335, 353
+                raw_date = _get(row, "ngay_ct")
+                entry_yr = _extract_year(raw_date, fallback_yr_txt)
+                b = _bucket(entry_yr)
+                if fname not in b.files_scanned:
+                    b.files_scanned.append(fname)
+
                 if tk_no.startswith("334"):
                     if ps_no > 0:
-                        summary.tk334_debit_total += ps_no
+                        b.tk334_debit_total += ps_no
                     if ps_co > 0:
-                        summary.tk334_credit_total += ps_co
+                        b.tk334_credit_total += ps_co
                     if tk_co.startswith(("3383", "3384", "3386")):
-                        summary.tk338_insurance_total += (ps_no or amt)
+                        b.tk338_insurance_total += (ps_no or amt)
                     if tk_co.startswith("3335"):
-                        summary.tk3335_credit_total += (ps_no or amt)
+                        b.tk3335_credit_total += (ps_no or amt)
                 elif tk_co.startswith("334") and ps_no > 0 and "ps_co" not in cmap:
-                    summary.tk334_credit_total += ps_no
+                    b.tk334_credit_total += ps_no
 
                 if tk_no.startswith("3335"):
                     if ps_co > 0:
-                        summary.tk3335_credit_total += ps_co
+                        b.tk3335_credit_total += ps_co
                     if ps_no > 0:
-                        summary.tk3335_debit_total += ps_no
+                        b.tk3335_debit_total += ps_no
 
                 if tk_no.startswith("353") and (ps_no > 0 or amt > 0):
-                    summary.tk353_debit_total += (ps_no or amt)
+                    b.tk353_debit_total += (ps_no or amt)
 
-                # 2. Quét rủi ro chi phí chịu thuế TNCN bỏ sót
                 risk = _classify_risk(dien_giai, tk_no, tk_co, amt)
                 if risk is not None:
                     nhom, muc_do, can_cu = risk
-                    summary.flagged_entries.append(
+                    b.flagged_entries.append(
                         FlaggedCostEntry(
-                            source_file=os.path.basename(path),
-                            ngay_ct=_fmt_date(_get(row, "ngay_ct")),
+                            source_file=fname,
+                            ngay_ct=_fmt_date(raw_date),
                             so_ct=_clean_text(_get(row, "so_ct")),
                             tk_no=tk_no,
                             tk_co=tk_co,
@@ -274,8 +303,27 @@ def scan_accounting_ledgers(file_paths: Sequence[str]) -> LedgerAuditSummary:
                             nhom_rui_ro=nhom,
                             muc_do=muc_do,
                             can_cu_phap_ly=can_cu,
+                            year=entry_yr,
                         )
                     )
         wb.close()
 
-    return summary
+    return by_year
+
+
+def scan_accounting_ledgers(file_paths: Sequence[str]) -> LedgerAuditSummary:
+    """Quét 1 hoặc nhiều file Excel sổ chi tiết tài khoản / bảng lương và gộp toàn bộ thành 1 LedgerAuditSummary."""
+    by_year = scan_accounting_ledgers_by_year(file_paths)
+    merged = LedgerAuditSummary()
+    for b in by_year.values():
+        for fn in b.files_scanned:
+            if fn not in merged.files_scanned:
+                merged.files_scanned.append(fn)
+        merged.tk334_credit_total += b.tk334_credit_total
+        merged.tk334_debit_total += b.tk334_debit_total
+        merged.tk338_insurance_total += b.tk338_insurance_total
+        merged.tk3335_credit_total += b.tk3335_credit_total
+        merged.tk3335_debit_total += b.tk3335_debit_total
+        merged.tk353_debit_total += b.tk353_debit_total
+        merged.flagged_entries.extend(b.flagged_entries)
+    return merged

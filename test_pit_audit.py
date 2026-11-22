@@ -311,6 +311,38 @@ class TestPitAuditPro(unittest.TestCase):
         self.assertIn("TRÙNG NNT KHÁC TRÊN TMS", res[6].dup_status)
         self.assertIn("8000000099", res[6].dup_status)
 
+    def test_v13_multi_year_ledger_split(self) -> None:
+        """Kiểm thử v1.3: Nạp nhiều file sổ chi tiết/bảng lương nhiều năm -> tự động tách đúng dữ liệu từng năm."""
+        from ledger_payroll_scanner import scan_accounting_ledgers_by_year
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f23 = os.path.join(tmpdir, "SoChiTiet_2023.xlsx")
+            f24 = os.path.join(tmpdir, "SoChiTiet_2024.xlsx")
+
+            wb23 = openpyxl.Workbook()
+            ws23 = wb23.active
+            ws23.append(["Ngày CT", "Số CT", "Diễn giải", "TK Nợ", "TK Có", "Phát sinh Nợ", "Phát sinh Có", "Đối tượng"])
+            ws23.append(["20/06/2023", "PC23", "Chi tiền thuê nhà chuyên gia", "6427", "1121", 60_000_000, 0, "Chuyên gia A"])
+            ws23.append(["31/12/2023", "PL23", "Chi lương nhân viên 2023", "3341", "1121", 200_000_000, 0, "NV"])
+            wb23.save(f23)
+
+            wb24 = openpyxl.Workbook()
+            ws24 = wb24.active
+            ws24.append(["Ngày CT", "Số CT", "Diễn giải", "TK Nợ", "TK Có", "Phát sinh Nợ", "Phát sinh Có", "Đối tượng"])
+            ws24.append(["15/09/2024", "PC24", "Chi hoa hồng môi giới cá nhân", "6417", "1111", 12_000_000, 0, "Cá nhân B"])
+            ws24.append(["31/12/2024", "PL24", "Chi lương nhân viên 2024", "3341", "1121", 350_000_000, 0, "NV"])
+            wb24.save(f24)
+
+            by_yr = scan_accounting_ledgers_by_year([f23, f24])
+            self.assertIn(2023, by_yr)
+            self.assertIn(2024, by_yr)
+            self.assertEqual(by_yr[2023].tk334_debit_total, 200_000_000)
+            self.assertEqual(by_yr[2024].tk334_debit_total, 350_000_000)
+            self.assertEqual(len(by_yr[2023].flagged_entries), 1)
+            self.assertEqual(by_yr[2023].flagged_entries[0].so_ct, "PC23")
+            self.assertEqual(len(by_yr[2024].flagged_entries), 1)
+            self.assertEqual(by_yr[2024].flagged_entries[0].so_ct, "PC24")
+
 
 if __name__ == "__main__":
     unittest.main()
