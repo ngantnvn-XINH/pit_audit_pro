@@ -1,8 +1,10 @@
-# PIT Audit Pro — Phần Mềm Đối Chiếu & Tính Thuế TNCN Chuyên Sâu (v1.0)
+# PIT Audit Pro — Phần Mềm Đối Chiếu & Tính Thuế TNCN Chuyên Sâu (v1.1)
 
 Ứng dụng Desktop Windows độc lập chuyên dụng cho công tác thanh tra, kiểm tra, đối chiếu và tính lại **Thuế Thu nhập cá nhân (TNCN)** theo từng thời kỳ pháp luật Việt Nam (2013 – 2026+).
 
-## Tính năng cốt lõi (v1.0)
+## Tính năng cốt lõi (v1.1)
+- **Nạp hàng loạt tờ khai XML nhiều năm & nhiều lần bổ sung:** Quét cả thư mục con, tự động lọc tờ khai QTT TNCN (`05/QTT-TNCN` cả TT92 & TT80), lọc theo khoảng **`Từ năm ... đến năm ...`**, tự động chốt bản bổ sung cuối cùng mỗi năm và kế thừa phụ lục `05-3` từ lần kê khai trước.
+- **Xuất từng năm ra file `QTT_TNCN_YYYY.xlsx` chuẩn 100% mẫu `tax_xml_to_excel` (`TK`, `05-1`, `05-2`, `05-3`)** và **đối chiếu trực tiếp Người phụ thuộc TMS ngay trên các cột `L..S` của sheet `05-3`** (kèm sheet tổng hợp lỗi `DoiChieu_NPT` & dữ liệu sạch `DS_NPT_TMS`).
 - **Động cơ chính sách đa thời kỳ (`pit_tax_rules.py`):**
   - Tự động áp dụng mức giảm trừ gia cảnh & biểu thuế lũy tiến theo năm:
     - `2013–2019`: Bản thân `9.000.000 đ/tháng`, NPT `3.600.000 đ/tháng`, biểu lũy tiến **7 bậc**.

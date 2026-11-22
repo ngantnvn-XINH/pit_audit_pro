@@ -165,6 +165,100 @@ class TestPitAuditPro(unittest.TestCase):
             # Kiểm tra TinhLai_05_1 liên kết SUMIF tự động từ DoiChieu_05_3
             self.assertIn("SUMIF(DoiChieu_05_3!", str(wb_out["TinhLai_05_1"]["M2"].value))
 
+    def test_v11_multi_year_supplements_filter_and_direct_053_reconciliation(self) -> None:
+        """Kiểm thử v1.1: Nạp nhiều năm + tờ khai bổ sung, lọc Từ năm..Đến năm, kế thừa 05-3, xuất QTT_TNCN_YYYY.xlsx chuẩn mẫu & đối chiếu trực tiếp trên 05-3."""
+        from pit_workflow import export_yearly_tncn_with_audit
+        from tax_parser import parse_tax_xml
+
+        xml_2022 = """<?xml version="1.0" encoding="UTF-8"?>
+<HSoThueDTu xmlns="http://kekhaithue.gdt.gov.vn/TKhaiThue">
+  <HSoKhaiThue>
+    <TTinChung><TTinTKhaiThue>
+      <TKhaiThue><maTKhai>953</maTKhai><tenTKhai>Tờ khai QTT TNCN</tenTKhai>
+        <KyKKhaiThue><kyKKhai>2022</kyKKhai><kyKKhaiTuNgay>01/01/2022</kyKKhaiTuNgay><kyKKhaiDenNgay>31/12/2022</kyKKhaiDenNgay></KyKKhaiThue>
+        <ngayLapTKhai>2023-03-20</ngayLapTKhai><soLan>0</soLan>
+      </TKhaiThue>
+      <NNT><mst>0100000001</mst><tenNNT>CTY A</tenNNT></NNT>
+    </TTinTKhaiThue></TTinChung>
+    <CTieuTKhaiChinh><ct21>1</ct21></CTieuTKhaiChinh>
+  </HSoKhaiThue>
+</HSoThueDTu>"""
+
+        xml_2024_ct = """<?xml version="1.0" encoding="UTF-8"?>
+<HSoThueDTu xmlns="http://kekhaithue.gdt.gov.vn/TKhaiThue">
+  <HSoKhaiThue>
+    <TTinChung><TTinTKhaiThue>
+      <TKhaiThue><maTKhai>953</maTKhai><tenTKhai>Tờ khai QTT TNCN</tenTKhai>
+        <KyKKhaiThue><kyKKhai>2024</kyKKhai><kyKKhaiTuNgay>01/01/2024</kyKKhaiTuNgay><kyKKhaiDenNgay>31/12/2024</kyKKhaiDenNgay></KyKKhaiThue>
+        <ngayLapTKhai>2025-03-20</ngayLapTKhai><soLan>0</soLan>
+      </TKhaiThue>
+      <NNT><mst>0100000001</mst><tenNNT>CTY A</tenNNT></NNT>
+    </TTinTKhaiThue></TTinChung>
+    <CTieuTKhaiChinh><ct21>1</ct21></CTieuTKhaiChinh>
+    <PLuc>
+      <PLuc_05_3_BK_QTT>
+        <BCaoCTietNPT><CTietNPT>
+          <ct07>Nguyễn Văn A</ct07><ct08>8000000001</ct08><ct09>Nguyễn Bé Một</ct09>
+          <ct10>01/01/2018</ct10><ct11>8900000001</ct11><ct12>CCCD</ct12><ct13>079218000001</ct13>
+          <ct14>Con</ct14><ct15>01/2024</ct15><ct16>12/2024</ct16>
+        </CTietNPT></BCaoCTietNPT>
+      </PLuc_05_3_BK_QTT>
+    </PLuc>
+  </HSoKhaiThue>
+</HSoThueDTu>"""
+
+        # Tờ khai bổ sung lần 1 năm 2024 (không đính kèm 05-3 -> phải tự kế thừa 05-3 từ bản chính thức!)
+        xml_2024_bs1 = """<?xml version="1.0" encoding="UTF-8"?>
+<HSoThueDTu xmlns="http://kekhaithue.gdt.gov.vn/TKhaiThue">
+  <HSoKhaiThue>
+    <TTinChung><TTinTKhaiThue>
+      <TKhaiThue><maTKhai>953</maTKhai><tenTKhai>Tờ khai QTT TNCN</tenTKhai>
+        <KyKKhaiThue><kyKKhai>2024</kyKKhai><kyKKhaiTuNgay>01/01/2024</kyKKhaiTuNgay><kyKKhaiDenNgay>31/12/2024</kyKKhaiDenNgay></KyKKhaiThue>
+        <ngayLapTKhai>2025-05-15</ngayLapTKhai><soLan>1</soLan>
+      </TKhaiThue>
+      <NNT><mst>0100000001</mst><tenNNT>CTY A</tenNNT></NNT>
+    </TTinTKhaiThue></TTinChung>
+    <CTieuTKhaiChinh><ct21>2</ct21></CTieuTKhaiChinh>
+  </HSoKhaiThue>
+</HSoThueDTu>"""
+
+        tms_csv = (
+            "19.11.2026 HIỂN THỊ DANH SÁCH ĐỘNG\n\nDanh sách kết quả\n"
+            "Ngày tạo,Ngày TĐ,MST NNT,Tên NNT,MST NPT,Tên NPT,Tên trạng thái NPT,Ngày sinh,CMND,Quan hệ,Tháng,Tháng,Mẫu BK/TK,Mã trạng t\n"
+            "10.01.2024,10.07.2024,8000000001,Nguyễn Văn A,8900000001,Nguyễn Bé Một,NNT đang hoạt động,01.01.2018,079218000001,Con,12024,62024,16-TH,00\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f22 = os.path.join(tmpdir, "2022.xml")
+            f24_0 = os.path.join(tmpdir, "2024_ct.xml")
+            f24_1 = os.path.join(tmpdir, "2024_bs1.xml")
+            tms_p = os.path.join(tmpdir, "tms.csv")
+            out_dir = os.path.join(tmpdir, "out")
+            for p, txt in ((f22, xml_2022), (f24_0, xml_2024_ct), (f24_1, xml_2024_bs1), (tms_p, tms_csv)):
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(txt)
+
+            decls = [parse_tax_xml(f22), parse_tax_xml(f24_0), parse_tax_xml(f24_1)]
+            # Lọc chỉ lấy từ năm 2023 đến 2025 -> chỉ xuất QTT_TNCN_2024.xlsx (bỏ qua 2022)
+            created, stats = export_yearly_tncn_with_audit(
+                decls, out_dir, year_from=2023, year_to=2025, tms_npt_path=tms_p
+            )
+            self.assertEqual(len(created), 1)
+            self.assertTrue(created[0].endswith("QTT_TNCN_2024.xlsx"))
+            self.assertEqual(stats[2024]["total_rows"], 1)
+            self.assertEqual(stats[2024]["total_diff_months"], 6)
+
+            wb = openpyxl.load_workbook(created[0], data_only=False)
+            # Đúng 4 sheet chuẩn mẫu TK, 05-1, 05-2, 05-3 + DS_NPT_TMS + DoiChieu_NPT
+            for s in ("TK", "05-1", "05-2", "05-3", "DS_NPT_TMS", "DoiChieu_NPT"):
+                self.assertIn(s, wb.sheetnames)
+            # Đối chiếu trực tiếp trên sheet 05-3 (cột L..S, dòng 4)
+            ws_053 = wb["05-3"]
+            self.assertEqual(ws_053["L4"].value, 12)
+            self.assertEqual(ws_053["P4"].value, 6)
+            self.assertEqual(ws_053["Q4"].value, "=MAX(0,L4-P4)")
+            self.assertIn("VƯỢT THỜI GIAN ĐĂNG KÝ", str(ws_053["S4"].value))
+
 
 if __name__ == "__main__":
     unittest.main()

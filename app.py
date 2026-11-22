@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Giao diện Desktop cho phần mềm chuyên dụng Đối chiếu & Tính Thuế TNCN (pit_audit_pro v1.0).
-Đầu vào hỗ trợ:
-1. Tờ khai Quyết toán TNCN: File XML (05/QTT-TNCN) hoặc file Excel (QTT_TNCN_YYYY.xlsx)
-2. File Người phụ thuộc kết xuất từ hệ thống TMS (.xlsx / .csv) - Tùy chọn
-3. Các file Sổ chi tiết tài khoản (TK 334, 353, 641, 642, 622, 627, 154, 338, 3335...) - Tùy chọn
+PIT Audit Pro (v1.1) — Phần mềm chuyên dụng Đối chiếu & Tính Thuế TNCN:
+- Nạp nhiều file XML / cả thư mục XML QTT TNCN nhiều năm (có cả tờ khai chính thức & bổ sung).
+- Lọc theo khoảng năm [Từ năm ... đến năm ...], tự động chốt tờ khai bổ sung cuối cùng của từng năm
+  và kế thừa phụ lục 05-3 từ lần kê khai trước.
+- Xuất từng năm ra file `QTT_TNCN_YYYY.xlsx` chuẩn 100% mẫu (TK, 05-1, 05-2, 05-3) giống tax_xml_to_excel.
+- Đối chiếu Người phụ thuộc (file TMS .xlsx/.csv) TRỰC TIẾP trên các cột bên phải (L..S) của sheet `05-3`
+  (kèm sheet tổng hợp lỗi `DoiChieu_NPT` và bản sạch `DS_NPT_TMS`).
+- Tùy chọn quét thêm sổ chi tiết tài khoản chi phí (`TK 334, 353, 641, 642, 622, 627, 154...`).
 """
 
 from __future__ import annotations
@@ -13,26 +16,26 @@ import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
-from ledger_payroll_scanner import LedgerAuditSummary, scan_accounting_ledgers
-from npt_tms_engine import audit_dependents, parse_tms_npt_file
-from pit_excel_exporter import export_pit_audit_workbook
-from pit_tax_rules import get_policy_for_year
-from xml_05qtt_parser import load_pit_declaration
+from pit_workflow import export_yearly_tncn_with_audit, reconcile_existing_tncn_excel
+from tax_parser import TaxDeclaration, parse_tax_xml
 
 
-APP_VERSION = "v1.0"
+APP_VERSION = "v1.1"
 
 
 class PitAuditProApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title(f"PIT Audit Pro — Phần mềm Đối chiếu & Tính Thuế TNCN Chuyên sâu ({APP_VERSION})")
-        self.root.geometry("980x620")
-        self.root.minsize(880, 540)
+        self.root.title(f"PIT Audit Pro — Đối chiếu & Tính Thuế TNCN Chuyên sâu ({APP_VERSION})")
+        self.root.geometry("1120x690")
+        self.root.minsize(980, 580)
 
+        self.declarations: List[TaxDeclaration] = []
+        self.file_paths_set: set[str] = set()
         self.ledger_files: List[str] = []
+
         self._setup_style()
         self._build_ui()
 
@@ -44,184 +47,374 @@ class PitAuditProApp:
             style.theme_use("clam")
         style.configure("Header.TLabel", font=("Segoe UI", 13, "bold"), foreground="#1F4E78")
         style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"))
+        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
     def _build_ui(self) -> None:
-        top = ttk.Frame(self.root, padding=(14, 12, 14, 6))
+        top = ttk.Frame(self.root, padding=(12, 10, 12, 4))
         top.pack(fill=tk.X)
         ttk.Label(
             top,
-            text=f"PHẦN MỀM ĐỐI CHIẾU & TÍNH THUẾ TNCN CHUYÊN SÂU ({APP_VERSION})",
+            text=f"PIT AUDIT PRO — ĐỐI CHIẾU & TÍNH THUẾ TNCN CHUYÊN SÂU ({APP_VERSION})",
             style="Header.TLabel",
         ).pack(side=tk.LEFT)
 
-        # 1. File tờ khai 05/QTT-TNCN (XML hoặc Excel)
-        f1 = ttk.LabelFrame(self.root, text="1. Tờ khai Quyết toán Thuế TNCN (File XML 05/QTT-TNCN hoặc Excel QTT_TNCN_YYYY.xlsx)", padding=10)
-        f1.pack(fill=tk.X, padx=14, pady=5)
-        self.var_decl_path = tk.StringVar()
-        ttk.Entry(f1, textvariable=self.var_decl_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(f1, text="Chọn file 05/QTT-TNCN...", command=self.pick_decl_file).pack(side=tk.LEFT)
+        # 1. Chọn nhiều file XML / thư mục XML nhiều năm (có cả tờ khai bổ sung)
+        f1 = ttk.LabelFrame(self.root, text="1. Chọn tờ khai Quyết toán TNCN XML nhiều năm (hỗ trợ cả tờ khai chính thức & bổ sung)", padding=8)
+        f1.pack(fill=tk.X, padx=12, pady=4)
 
-        # 2. File NPT hệ thống TMS (tùy chọn)
-        f2 = ttk.LabelFrame(self.root, text="2. File Người phụ thuộc kết xuất từ TMS (.xlsx / .csv) — Tùy chọn đối chiếu 05-3 & tính lại 05-1", padding=10)
-        f2.pack(fill=tk.X, padx=14, pady=5)
-        self.var_tms_path = tk.StringVar()
-        ttk.Entry(f2, textvariable=self.var_tms_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(f2, text="Chọn file NPT TMS...", command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(f2, text="Bỏ chọn", command=lambda: self.var_tms_path.set("")).pack(side=tk.LEFT)
+        ttk.Button(f1, text="Chọn nhiều file XML...", command=self.add_files).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(f1, text="Chọn thư mục (quét cả thư mục con)...", command=self.add_folder).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(f1, text="Xóa mục đang chọn", command=self.remove_selected).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(f1, text="Xóa tất cả", command=self.clear_all).pack(side=tk.LEFT)
 
-        # 3. Các file sổ chi tiết tài khoản (TK 334, 353, 641, 642, 622, 627, 154, 338, 3335...)
-        f3 = ttk.LabelFrame(self.root, text="3. Sổ chi tiết tài khoản kế toán (TK 334, 353, 641, 642, 622, 627, 338, 3335...) — Tùy chọn quét rủi ro chi phí", padding=10)
-        f3.pack(fill=tk.BOTH, expand=True, padx=14, pady=5)
+        self.lbl_count = ttk.Label(f1, text="Tổng: 0 file TNCN", font=("Segoe UI", 9, "bold"))
+        self.lbl_count.pack(side=tk.RIGHT)
 
-        btn_row = ttk.Frame(f3)
-        btn_row.pack(fill=tk.X, pady=(0, 6))
-        ttk.Button(btn_row, text="Thêm file sổ chi tiết (.xlsx)...", command=self.add_ledger_files).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btn_row, text="Xóa file đang chọn", command=self.remove_selected_ledger).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btn_row, text="Xóa tất cả", command=self.clear_ledgers).pack(side=tk.LEFT)
-        self.lbl_ledger_cnt = ttk.Label(btn_row, text="Đã chọn: 0 file sổ chi tiết")
-        self.lbl_ledger_cnt.pack(side=tk.RIGHT)
+        # 1b. Bộ lọc khoảng năm Từ năm ... đến năm ...
+        f_yr = ttk.LabelFrame(self.root, text="2. Lọc kỳ / năm quyết toán cần xuất (tự động chốt tờ khai bổ sung cuối cùng mỗi năm & kế thừa 05-3)", padding=8)
+        f_yr.pack(fill=tk.X, padx=12, pady=4)
 
-        self.lst_ledgers = tk.Listbox(f3, height=6, selectmode=tk.EXTENDED, font=("Segoe UI", 9))
-        self.lst_ledgers.pack(fill=tk.BOTH, expand=True)
+        self.var_filter_year = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f_yr,
+            text="Chỉ lấy từ năm:",
+            variable=self.var_filter_year,
+            command=self._toggle_year_filter,
+        ).pack(side=tk.LEFT, padx=(0, 4))
 
-        # Khung nhật ký kết quả
-        log_frame = ttk.LabelFrame(self.root, text="4. Nhật ký phân tích & Tóm tắt chính sách áp dụng", padding=8)
-        log_frame.pack(fill=tk.X, padx=14, pady=5)
-        self.txt_log = tk.Text(log_frame, height=6, font=("Consolas", 9), state=tk.DISABLED)
-        self.txt_log.pack(fill=tk.X)
+        self.var_year_from = tk.StringVar(value="2020")
+        self.ent_year_from = ttk.Entry(f_yr, textvariable=self.var_year_from, width=7, state=tk.DISABLED)
+        self.ent_year_from.pack(side=tk.LEFT, padx=(0, 6))
+        self.var_year_from.trace_add("write", lambda *_: self.refresh_table())
+
+        ttk.Label(f_yr, text="đến năm:").pack(side=tk.LEFT, padx=(0, 4))
+        self.var_year_to = tk.StringVar(value="2025")
+        self.ent_year_to = ttk.Entry(f_yr, textvariable=self.var_year_to, width=7, state=tk.DISABLED)
+        self.ent_year_to.pack(side=tk.LEFT, padx=(0, 10))
+        self.var_year_to.trace_add("write", lambda *_: self.refresh_table())
+
+        ttk.Label(
+            f_yr,
+            text="(Bỏ tick để xuất tất cả các năm có trong danh sách; mỗi năm xuất 1 file QTT_TNCN_YYYY.xlsx chuẩn 4 sheet TK, 05-1, 05-2, 05-3)",
+            font=("Segoe UI", 8, "italic"),
+            foreground="#555555",
+        ).pack(side=tk.LEFT)
+
+        # 2. Chọn file Người phụ thuộc hệ thống TMS để đối chiếu trực tiếp trên 05-3
+        f_tms = ttk.LabelFrame(self.root, text="3. File Người phụ thuộc kết xuất từ TMS (.xlsx / .csv) — Đối chiếu trực tiếp trên sheet 05-3", padding=8)
+        f_tms.pack(fill=tk.X, padx=12, pady=4)
+
+        self.var_tms_path = tk.StringVar(value="")
+        ttk.Label(f_tms, text="File NPT TMS:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(f_tms, textvariable=self.var_tms_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ttk.Button(f_tms, text="Chọn file NPT (.xlsx/.csv)...", command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(f_tms, text="Bỏ chọn", command=lambda: self.var_tms_path.set("")).pack(side=tk.LEFT)
+
+        # 3. Chọn thêm sổ chi tiết tài khoản chi phí (tùy chọn)
+        f_led = ttk.LabelFrame(self.root, text="4. Sổ chi tiết tài khoản chi phí (TK 334, 353, 641, 642, 622, 627...) — Tùy chọn quét rủi ro chi phí TNCN", padding=8)
+        f_led.pack(fill=tk.X, padx=12, pady=4)
+
+        ttk.Button(f_led, text="Thêm sổ chi tiết (.xlsx)...", command=self.add_ledger_files).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(f_led, text="Xóa sổ chi tiết", command=self.clear_ledgers).pack(side=tk.LEFT, padx=(0, 8))
+        self.lbl_ledgers = ttk.Label(f_led, text="Chưa chọn file sổ chi tiết nào", font=("Segoe UI", 9, "italic"), foreground="#555555")
+        self.lbl_ledgers.pack(side=tk.LEFT)
+
+        # Bảng xem trước danh sách file XML TNCN
+        tbl_frame = ttk.Frame(self.root, padding=(12, 4, 12, 4))
+        tbl_frame.pack(fill=tk.BOTH, expand=True)
+
+        cols = ("file_name", "ma_tkhai", "mst", "ten_nnt", "year", "so_lan", "ngay_lap", "status")
+        self.tree = ttk.Treeview(tbl_frame, columns=cols, show="headings", selectmode="extended")
+        headers: Dict[str, Tuple[str, int, str]] = {
+            "file_name": ("Tên file XML", 230, "w"),
+            "ma_tkhai": ("Mã TK", 80, "center"),
+            "mst": ("MST", 115, "center"),
+            "ten_nnt": ("Tên đơn vị chi trả", 250, "w"),
+            "year": ("Năm", 70, "center"),
+            "so_lan": ("Lần BS", 70, "center"),
+            "ngay_lap": ("Ngày lập", 95, "center"),
+            "status": ("Trạng thái", 130, "w"),
+        }
+        for c, (txt, w, anc) in headers.items():
+            self.tree.heading(c, text=txt)
+            self.tree.column(c, width=w, anchor=anc)  # type: ignore[arg-type]
+
+        vsb = ttk.Scrollbar(tbl_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        hsb = ttk.Scrollbar(tbl_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tbl_frame.rowconfigure(0, weight=1)
+        tbl_frame.columnconfigure(0, weight=1)
 
         # Thanh đáy
-        bottom = ttk.Frame(self.root, padding=(14, 8, 14, 12))
+        bottom = ttk.Frame(self.root, padding=(12, 8, 12, 12))
         bottom.pack(fill=tk.X)
+
         self.var_open_after = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bottom, text="Mở file Excel kết quả sau khi chạy", variable=self.var_open_after).pack(side=tk.LEFT)
+        ttk.Checkbutton(bottom, text="Mở thư mục sau khi xuất", variable=self.var_open_after).pack(side=tk.LEFT, padx=(0, 12))
 
         self.lbl_status = ttk.Label(bottom, text="Sẵn sàng", font=("Segoe UI", 9, "italic"))
-        self.lbl_status.pack(side=tk.LEFT, padx=16)
+        self.lbl_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self.btn_run = ttk.Button(
+        self.btn_export = ttk.Button(
             bottom,
-            text="CHẠY ĐỐI CHIẾU & XUẤT BÁO CÁO TNCN",
+            text="XUẤT FILE QTT TNCN THEO NĂM & ĐỐI CHIẾU",
             style="Primary.TButton",
-            command=self.run_audit,
+            command=self.run_export,
         )
-        self.btn_run.pack(side=tk.RIGHT)
+        self.btn_export.pack(side=tk.RIGHT, padx=(8, 0))
 
-    def _log(self, msg: str) -> None:
-        self.txt_log.config(state=tk.NORMAL)
-        self.txt_log.insert(tk.END, msg + "\n")
-        self.txt_log.see(tk.END)
-        self.txt_log.config(state=tk.DISABLED)
-
-    def pick_decl_file(self) -> None:
-        p = filedialog.askopenfilename(
-            title="Chọn file XML 05/QTT-TNCN hoặc file Excel QTT_TNCN_YYYY.xlsx",
-            filetypes=[("XML / Excel", "*.xml *.xlsx"), ("XML", "*.xml"), ("Excel", "*.xlsx")],
+        self.btn_reconcile_excel = ttk.Button(
+            bottom,
+            text="ĐỐI CHIẾU NPT TRÊN EXCEL ĐÃ CÓ",
+            command=self.run_reconcile_existing,
         )
-        if p:
-            self.var_decl_path.set(os.path.normpath(p))
+        self.btn_reconcile_excel.pack(side=tk.RIGHT)
+
+    def _toggle_year_filter(self) -> None:
+        state = tk.NORMAL if self.var_filter_year.get() else tk.DISABLED
+        self.ent_year_from.config(state=state)
+        self.ent_year_to.config(state=state)
+        self.refresh_table()
+
+    def _get_year_bounds(self) -> Tuple[Optional[int], Optional[int]]:
+        if not self.var_filter_year.get():
+            return None, None
+        y_from: Optional[int] = None
+        y_to: Optional[int] = None
+        s1 = self.var_year_from.get().strip()
+        s2 = self.var_year_to.get().strip()
+        if s1.isdigit():
+            y_from = int(s1)
+        if s2.isdigit():
+            y_to = int(s2)
+        return y_from, y_to
+
+    def _matches_year(self, d: TaxDeclaration) -> bool:
+        y_from, y_to = self._get_year_bounds()
+        if y_from is not None and d.year is not None and d.year < y_from:
+            return False
+        if y_to is not None and d.year is not None and d.year > y_to:
+            return False
+        return True
+
+    def _ingest_xml_paths(self, paths: List[str]) -> None:
+        new_paths = [os.path.normpath(p) for p in paths if p.lower().endswith(".xml") and os.path.normpath(p) not in self.file_paths_set]
+        if not new_paths:
+            return
+        self.lbl_status.config(text=f"Đang đọc {len(new_paths)} file XML...")
+        self.root.update_idletasks()
+        added = 0
+        for p in new_paths:
+            d = parse_tax_xml(p)
+            if d.error is None and d.tax_type != "TNCN":
+                continue  # Chỉ nạp tờ khai Quyết toán TNCN
+            self.file_paths_set.add(p)
+            self.declarations.append(d)
+            added += 1
+        self.refresh_table()
+        self.lbl_status.config(text=f"Đã nạp thêm {added} file QTT TNCN.")
+
+    def add_files(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Chọn nhiều file XML Tờ khai Quyết toán TNCN (05/QTT-TNCN)",
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+        )
+        if paths:
+            self._ingest_xml_paths(list(paths))
+
+    def add_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Chọn thư mục chứa hồ sơ XML (tự động quét thư mục con & lọc tờ khai QTT TNCN)")
+        if not folder:
+            return
+        found: List[str] = []
+        for root_dir, _, files in os.walk(folder):
+            for fn in files:
+                if fn.lower().endswith(".xml"):
+                    found.append(os.path.join(root_dir, fn))
+        self._ingest_xml_paths(found)
+
+    def remove_selected(self) -> None:
+        selected = set(self.tree.selection())
+        if not selected:
+            return
+        kept: List[TaxDeclaration] = []
+        for d in self.declarations:
+            if d.file_path in selected:
+                self.file_paths_set.discard(d.file_path)
+            else:
+                kept.append(d)
+        self.declarations = kept
+        self.refresh_table()
+
+    def clear_all(self) -> None:
+        self.declarations.clear()
+        self.file_paths_set.clear()
+        self.refresh_table()
 
     def pick_tms_file(self) -> None:
         p = filedialog.askopenfilename(
-            title="Chọn file dữ liệu Người phụ thuộc kết xuất từ TMS (.xlsx / .csv)",
-            filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("All files", "*.*")],
+            title="Chọn file Người phụ thuộc kết xuất từ hệ thống TMS (.xlsx hoặc .csv)",
+            filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel Workbook", "*.xlsx"), ("CSV", "*.csv"), ("All files", "*.*")],
         )
         if p:
             self.var_tms_path.set(os.path.normpath(p))
 
     def add_ledger_files(self) -> None:
         paths = filedialog.askopenfilenames(
-            title="Chọn các file Excel sổ chi tiết tài khoản (TK 334, 353, 641, 642, 622, 627, 338, 3335...)",
+            title="Chọn các file Excel sổ chi tiết tài khoản (TK 334, 353, 641, 642, 622, 627...)",
             filetypes=[("Excel Workbook", "*.xlsx")],
         )
         for p in paths:
             norm = os.path.normpath(p)
             if norm not in self.ledger_files:
                 self.ledger_files.append(norm)
-                self.lst_ledgers.insert(tk.END, norm)
-        self.lbl_ledger_cnt.config(text=f"Đã chọn: {len(self.ledger_files)} file sổ chi tiết")
-
-    def remove_selected_ledger(self) -> None:
-        for idx in reversed(self.lst_ledgers.curselection()):
-            self.lst_ledgers.delete(idx)
-            del self.ledger_files[idx]
-        self.lbl_ledger_cnt.config(text=f"Đã chọn: {len(self.ledger_files)} file sổ chi tiết")
+        self.lbl_ledgers.config(
+            text=f"Đã chọn {len(self.ledger_files)} file sổ chi tiết" if self.ledger_files else "Chưa chọn file sổ chi tiết nào"
+        )
 
     def clear_ledgers(self) -> None:
-        self.lst_ledgers.delete(0, tk.END)
         self.ledger_files.clear()
-        self.lbl_ledger_cnt.config(text="Đã chọn: 0 file sổ chi tiết")
+        self.lbl_ledgers.config(text="Chưa chọn file sổ chi tiết nào")
 
-    def run_audit(self) -> None:
-        decl_path = self.var_decl_path.get().strip()
-        if not decl_path or not os.path.isfile(decl_path):
-            messagebox.showwarning("Thiếu dữ liệu", "Vui lòng chọn file Tờ khai Quyết toán TNCN (XML hoặc Excel) trước.")
+    def refresh_table(self) -> None:
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        shown = 0
+        for d in sorted(self.declarations, key=lambda x: (x.year or 0, int(x.so_lan or 0), x.file_name)):
+            if not self._matches_year(d):
+                continue
+            shown += 1
+            st = "Hợp lệ" if d.error is None else f"Lỗi: {d.error}"
+            nl = d.ngay_lap.strftime("%d/%m/%Y") if d.ngay_lap else ""
+            lan_txt = "Chính thức" if not d.so_lan or str(d.so_lan) == "0" else f"BS lần {d.so_lan}"
+            self.tree.insert(
+                "",
+                tk.END,
+                iid=d.file_path,
+                values=(d.file_name, d.ma_tkhai, d.mst, d.ten_nnt, d.year or "", lan_txt, nl, st),
+            )
+        self.lbl_count.config(text=f"Hiển thị: {shown} / {len(self.declarations)} file TNCN")
+
+    def run_export(self) -> None:
+        valid = [d for d in self.declarations if d.error is None and self._matches_year(d)]
+        if not valid:
+            messagebox.showwarning("Chú ý", "Chưa có tờ khai QTT TNCN hợp lệ nào trong khoảng năm đã chọn.")
             return
 
-        out_path = filedialog.asksaveasfilename(
-            title="Lưu báo cáo đối chiếu & tính lại Thuế TNCN",
-            defaultextension=".xlsx",
-            initialfile="BaoCao_KiemTra_TNCN.xlsx",
-            filetypes=[("Excel Workbook", "*.xlsx")],
-        )
-        if not out_path:
+        out_dir = filedialog.askdirectory(title="Chọn thư mục lưu các file QTT_TNCN_YYYY.xlsx")
+        if not out_dir:
             return
 
+        y_from, y_to = self._get_year_bounds()
         tms_path = self.var_tms_path.get().strip()
+        valid_tms = tms_path if (tms_path and os.path.isfile(tms_path)) else None
         ledgers = list(self.ledger_files)
         open_after = self.var_open_after.get()
 
-        self.btn_run.config(state=tk.DISABLED)
-        self.lbl_status.config(text="Đang xử lý đối chiếu & tính lại thuế TNCN...")
-        self.txt_log.config(state=tk.NORMAL)
-        self.txt_log.delete("1.0", tk.END)
-        self.txt_log.config(state=tk.DISABLED)
+        self.btn_export.config(state=tk.DISABLED)
+        self.btn_reconcile_excel.config(state=tk.DISABLED)
+        self.lbl_status.config(text="Đang xuất file QTT TNCN từng năm & đối chiếu trực tiếp trên 05-3...")
+        self.root.update_idletasks()
 
         def worker() -> None:
             try:
-                decl = load_pit_declaration(decl_path)
-                policy = get_policy_for_year(decl.year)
-                self.root.after(0, lambda: self._log(
-                    f"[1/4] Đã đọc tờ khai năm {decl.year}: {len(decl.rows_051)} dòng 05-1, {len(decl.rows_052)} dòng 05-2, {len(decl.rows_053)} dòng 05-3."
-                ))
-                self.root.after(0, lambda: self._log(
-                    f"      Chính sách áp dụng: {policy.legal_basis} | Bản thân: {policy.self_deduction_monthly:,}đ/th | NPT: {policy.dependent_deduction_monthly:,}đ/th | Biểu: {'5 bậc' if decl.year >= 2026 else '7 bậc'}"
-                ))
-
-                tms_rows = parse_tms_npt_file(tms_path) if (tms_path and os.path.isfile(tms_path)) else []
-                npt_res, npt_per_nnt = audit_dependents(decl.rows_053, tms_rows)
-                disallowed_m = sum(x.disallowed_months for x in npt_res)
-                self.root.after(0, lambda: self._log(
-                    f"[2/4] Đối chiếu NPT (05-3 vs TMS): {len(tms_rows)} dòng TMS | Tổng số tháng NPT bị loại trừ: {disallowed_m} tháng."
-                ))
-
-                ledger_sum = scan_accounting_ledgers(ledgers) if ledgers else LedgerAuditSummary()
-                self.root.after(0, lambda: self._log(
-                    f"[3/4] Quét sổ kế toán ({len(ledger_sum.files_scanned)} file): Phát hiện {len(ledger_sum.flagged_entries)} bút toán chi phí nghi vấn chịu thuế TNCN."
-                ))
-
-                export_pit_audit_workbook(
-                    out_path, decl, npt_res, npt_per_nnt, tms_rows, ledger_summary=ledger_sum
+                created, stats_by_year = export_yearly_tncn_with_audit(
+                    self.declarations,
+                    out_dir,
+                    year_from=y_from,
+                    year_to=y_to,
+                    tms_npt_path=valid_tms,
+                    ledger_paths=ledgers,
                 )
 
                 def on_done() -> None:
-                    self._log(f"[4/4] Đã xuất hoàn tất báo cáo 7 sheet: {out_path}")
-                    self.btn_run.config(state=tk.NORMAL)
-                    self.lbl_status.config(text="Hoàn tất!")
-                    messagebox.showinfo("Hoàn tất", f"Đã xuất thành công báo cáo đối chiếu & tính lại Thuế TNCN:\n{out_path}")
+                    self.btn_export.config(state=tk.NORMAL)
+                    self.btn_reconcile_excel.config(state=tk.NORMAL)
+                    self.lbl_status.config(text="Xuất file & đối chiếu thành công!")
+                    lines = ["Đã xuất thành công các file QTT TNCN chuẩn mẫu (TK, 05-1, 05-2, 05-3):"] + created
+                    if stats_by_year:
+                        lines.append("\nKẾT QUẢ ĐỐI CHIẾU NGƯỜI PHỤ THUỘC TRỰC TIẾP TRÊN 05-3:")
+                        for yr, st in sorted(stats_by_year.items()):
+                            lines.append(
+                                f"• Năm {yr}: Tổng {st['total_rows']} dòng | Khớp: {st['matched']} | "
+                                f"Chênh lệch: {st['issues']} | Loại trừ: {st['total_diff_months']} tháng ({st['total_disallowed_amount']:,.0f} đ)"
+                            )
+                    messagebox.showinfo("Hoàn tất", "\n".join(lines))
                     if open_after:
                         try:
-                            os.startfile(out_path)
+                            os.startfile(out_dir)
                         except Exception:
                             pass
 
                 self.root.after(0, on_done)
             except Exception as exc:
                 def on_err() -> None:
-                    self.btn_run.config(state=tk.NORMAL)
+                    self.btn_export.config(state=tk.NORMAL)
+                    self.btn_reconcile_excel.config(state=tk.NORMAL)
                     self.lbl_status.config(text="Có lỗi xảy ra!")
-                    self._log(f"[LỖI] {exc}")
-                    messagebox.showerror("Lỗi", f"Không thể hoàn tất đối chiếu:\n{exc}")
+                    messagebox.showerror("Lỗi", f"Không thể xuất file QTT TNCN:\n{exc}")
+
+                self.root.after(0, on_err)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_reconcile_existing(self) -> None:
+        excel_path = filedialog.askopenfilename(
+            title="Bước 1/2: Chọn file QTT_TNCN_YYYY.xlsx đã xuất sẵn (có sheet 05-3)",
+            filetypes=[("Excel Workbook", "*.xlsx")],
+        )
+        if not excel_path:
+            return
+
+        tms_path = self.var_tms_path.get().strip()
+        if not tms_path or not os.path.isfile(tms_path):
+            tms_path = filedialog.askopenfilename(
+                title="Bước 2/2: Chọn file Người phụ thuộc kết xuất từ TMS (.xlsx / .csv)",
+                filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("All files", "*.*")],
+            )
+            if not tms_path:
+                return
+            self.var_tms_path.set(os.path.normpath(tms_path))
+
+        open_after = self.var_open_after.get()
+        self.btn_export.config(state=tk.DISABLED)
+        self.btn_reconcile_excel.config(state=tk.DISABLED)
+        self.lbl_status.config(text="Đang đối chiếu NPT trực tiếp trên sheet 05-3...")
+        self.root.update_idletasks()
+
+        def worker() -> None:
+            try:
+                st = reconcile_existing_tncn_excel(excel_path, tms_path)
+
+                def on_done() -> None:
+                    self.btn_export.config(state=tk.NORMAL)
+                    self.btn_reconcile_excel.config(state=tk.NORMAL)
+                    self.lbl_status.config(text="Đối chiếu NPT thành công!")
+                    msg = (
+                        f"Đã đối chiếu trực tiếp Người phụ thuộc trên sheet '05-3' của file:\n{excel_path}\n\n"
+                        f"• Tổng số dòng 05-3: {st['total_rows']}\n"
+                        f"• Số dòng KHỚP: {st['matched']}\n"
+                        f"• Số dòng CHÊNH LỆCH / CẦN KIỂM TRA: {st['issues']}\n"
+                        f"• Tổng số tháng loại trừ: {st['total_diff_months']} tháng\n"
+                        f"• Tổng tiền giảm trừ loại trừ: {st['total_disallowed_amount']:,.0f} đ"
+                    )
+                    messagebox.showinfo("Hoàn tất đối chiếu NPT", msg)
+                    if open_after:
+                        try:
+                            os.startfile(excel_path)
+                        except Exception:
+                            pass
+
+                self.root.after(0, on_done)
+            except Exception as exc:
+                def on_err() -> None:
+                    self.btn_export.config(state=tk.NORMAL)
+                    self.btn_reconcile_excel.config(state=tk.NORMAL)
+                    self.lbl_status.config(text="Lỗi khi đối chiếu NPT!")
+                    messagebox.showerror("Lỗi", f"Không thể đối chiếu NPT:\n{exc}")
 
                 self.root.after(0, on_err)
 
