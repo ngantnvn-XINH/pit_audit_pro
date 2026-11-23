@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import openpyxl
+from tabular_reader import read_tabular_sheets
 
 
 def _clean_text(val: Any) -> str:
@@ -225,10 +225,8 @@ def scan_accounting_ledgers_by_year(file_paths: Sequence[str]) -> Dict[Optional[
         if not path or not os.path.isfile(path):
             continue
         fname = os.path.basename(path)
-        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-        for sname in wb.sheetnames:
-            ws = wb[sname]
-            rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        sheets_map = read_tabular_sheets(path)
+        for sname, rows in sheets_map.items():
             if not rows:
                 continue
             hdr_idx, cmap = _detect_columns(rows)
@@ -306,7 +304,6 @@ def scan_accounting_ledgers_by_year(file_paths: Sequence[str]) -> Dict[Optional[
                             year=entry_yr,
                         )
                     )
-        wb.close()
 
     return by_year
 

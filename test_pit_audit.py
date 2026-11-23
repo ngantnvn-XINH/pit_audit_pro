@@ -343,6 +343,40 @@ class TestPitAuditPro(unittest.TestCase):
             self.assertEqual(len(by_yr[2024].flagged_entries), 1)
             self.assertEqual(by_yr[2024].flagged_entries[0].so_ct, "PC24")
 
+    def test_v13_legacy_xls_html_and_utf16_tsv_reader(self) -> None:
+        """Kiểm thử đọc file .xls giả định dạng HTML và UTF-16 TSV kết xuất từ TMS (không bao giờ lỗi 'File is not a zip file')."""
+        from npt_tms_engine import parse_tms_npt_file
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. File TMS dạng UTF-16LE Tab-delimited mang đuôi .xls
+            p_utf16 = os.path.join(tmpdir, "tms_sap.xls")
+            tsv_txt = (
+                "19.11.2026\tHIỂN THỊ DANH SÁCH ĐỘNG\n\nDanh sách kết quả\n"
+                "Ngày tạo\tNgày TĐ\tMST NNT\tTên NNT\tMST NPT\tTên NPT\tTên trạng thái NPT\tNgày sinh\tCMND\tQuan hệ\tTháng\tTháng\tMã trạng t\n"
+                "01.01.2024\t01.01.2024\t8000000001\tNguyễn Văn A\t8900000001\tNguyễn Bé Một\tNNT đang hoạt động\t01.01.2018\t079218000001\tCon\t12024\t\t00\n"
+            )
+            with open(p_utf16, "wb") as f:
+                f.write(tsv_txt.encode("utf-16"))
+            recs1 = parse_tms_npt_file(p_utf16)
+            self.assertEqual(len(recs1), 1)
+            self.assertEqual(recs1[0].mst_nnt, "8000000001")
+            self.assertEqual(recs1[0].tu_thang, (2024, 1))
+
+            # 2. File TMS dạng HTML table mang đuôi .xls
+            p_html = os.path.join(tmpdir, "tms_html.xls")
+            html_txt = (
+                "<html><body><table>"
+                "<tr><th>Ngày tạo</th><th>MST NNT</th><th>MST NPT</th><th>Tên NPT</th><th>Tháng</th><th>Tháng</th><th>Mã trạng t</th></tr>"
+                "<tr><td>01.02.2024</td><td>8000000002</td><td>8900000002</td><td>Trần Bé Hai</td><td>22024</td><td>62024</td><td>00</td></tr>"
+                "</table></body></html>"
+            )
+            with open(p_html, "w", encoding="utf-8") as f:
+                f.write(html_txt)
+            recs2 = parse_tms_npt_file(p_html)
+            self.assertEqual(len(recs2), 1)
+            self.assertEqual(recs2[0].mst_npt, "8900000002")
+            self.assertEqual(recs2[0].den_thang, (2024, 6))
+
 
 if __name__ == "__main__":
     unittest.main()

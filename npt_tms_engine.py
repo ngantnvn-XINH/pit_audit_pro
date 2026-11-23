@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import openpyxl
 
+from tabular_reader import read_first_sheet_rows
 from xml_05qtt_parser import Row053
 
 
@@ -213,21 +214,7 @@ class NptAuditResultRow:
 
 
 def parse_tms_npt_file(file_path: str) -> List[TmsNptRow]:
-    ext = os.path.splitext(file_path)[1].lower()
-    raw_rows: List[List[Any]] = []
-    if ext in (".csv", ".txt"):
-        for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-            try:
-                with open(file_path, "r", encoding=enc, newline="") as f:
-                    raw_rows = [r for r in csv.reader(f)]
-                break
-            except UnicodeDecodeError:
-                continue
-    else:
-        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
-        ws = wb[wb.sheetnames[0]]
-        raw_rows = [list(r) for r in ws.iter_rows(values_only=True)]
-        wb.close()
+    raw_rows = read_first_sheet_rows(file_path)
 
     hdr_idx: Optional[int] = None
     cmap: Dict[str, int] = {}

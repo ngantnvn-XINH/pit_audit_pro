@@ -108,7 +108,7 @@ class PitAuditProApp:
         self.var_tms_path = tk.StringVar(value="")
         ttk.Label(f_tms, text="File NPT TMS:").pack(side=tk.LEFT, padx=(0, 6))
         ttk.Entry(f_tms, textvariable=self.var_tms_path, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(f_tms, text="Thêm file NPT (.xlsx/.csv)...", command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(f_tms, text="Thêm file NPT (.xls/.xlsx/.csv)...", command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(f_tms, text="Xóa tất cả", command=self.clear_tms_files).pack(side=tk.LEFT)
 
         # 3. Chọn nhiều file / cả thư mục Sổ chi tiết tài khoản & Bảng tính lương/thuế nhiều năm
@@ -121,7 +121,7 @@ class PitAuditProApp:
 
         led_btns = ttk.Frame(f_led)
         led_btns.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(led_btns, text="Thêm nhiều file (.xlsx)...", command=self.add_ledger_files).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(led_btns, text="Thêm nhiều file (.xls/.xlsx/.csv)...", command=self.add_ledger_files).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(led_btns, text="Chọn thư mục sổ chi tiết / bảng lương (quét cả thư mục con)...", command=self.add_ledger_folder).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(led_btns, text="Xóa mục đang chọn", command=self.remove_selected_ledgers).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(led_btns, text="Xóa tất cả", command=self.clear_ledgers).pack(side=tk.LEFT)
@@ -273,8 +273,8 @@ class PitAuditProApp:
 
     def pick_tms_file(self) -> None:
         paths = filedialog.askopenfilenames(
-            title="Chọn 1 hoặc nhiều file Người phụ thuộc kết xuất từ hệ thống TMS (.xlsx hoặc .csv)",
-            filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel Workbook", "*.xlsx"), ("CSV", "*.csv"), ("All files", "*.*")],
+            title="Chọn 1 hoặc nhiều file Người phụ thuộc kết xuất từ hệ thống TMS (.xls, .xlsx hoặc .csv)",
+            filetypes=[("Excel / CSV", "*.xls *.xlsx *.csv"), ("Excel 97-2003", "*.xls"), ("Excel Workbook", "*.xlsx"), ("CSV", "*.csv"), ("All files", "*.*")],
         )
         for p in paths:
             norm = os.path.normpath(p)
@@ -290,7 +290,7 @@ class PitAuditProApp:
     def _add_ledger_paths(self, paths: List[str]) -> None:
         added = 0
         for p in paths:
-            if not p.lower().endswith(".xlsx") or os.path.basename(p).startswith("~$"):
+            if not p.lower().endswith((".xlsx", ".xls", ".csv")) or os.path.basename(p).startswith("~$"):
                 continue
             norm = os.path.normpath(p)
             if norm not in self.ledger_files:
@@ -303,8 +303,8 @@ class PitAuditProApp:
 
     def add_ledger_files(self) -> None:
         paths = filedialog.askopenfilenames(
-            title="Chọn nhiều file Excel sổ chi tiết tài khoản & bảng tính lương/thuế nhiều năm",
-            filetypes=[("Excel Workbook", "*.xlsx")],
+            title="Chọn nhiều file Excel/CSV sổ chi tiết tài khoản & bảng tính lương/thuế nhiều năm",
+            filetypes=[("Excel / CSV", "*.xlsx *.xls *.csv"), ("Excel Workbook", "*.xlsx"), ("Excel 97-2003", "*.xls"), ("All files", "*.*")],
         )
         if paths:
             self._add_ledger_paths(list(paths))
@@ -316,7 +316,7 @@ class PitAuditProApp:
         found: List[str] = []
         for root_dir, _, files in os.walk(folder):
             for fn in files:
-                if fn.lower().endswith(".xlsx") and not fn.startswith("~$"):
+                if fn.lower().endswith((".xlsx", ".xls", ".csv")) and not fn.startswith("~$"):
                     found.append(os.path.join(root_dir, fn))
         self._add_ledger_paths(found)
 
