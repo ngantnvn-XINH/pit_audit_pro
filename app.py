@@ -403,11 +403,13 @@ class PitAuditProApp:
 
                 self.root.after(0, on_done)
             except Exception as exc:
-                def on_err() -> None:
+                err_msg = str(exc)
+
+                def on_err(msg: str = err_msg) -> None:
                     self.btn_export.config(state=tk.NORMAL)
                     self.btn_reconcile_excel.config(state=tk.NORMAL)
                     self.lbl_status.config(text="Có lỗi xảy ra!")
-                    messagebox.showerror("Lỗi", f"Không thể xuất file QTT TNCN:\n{exc}")
+                    messagebox.showerror("Lỗi", f"Không thể xuất file QTT TNCN:\n{msg}")
 
                 self.root.after(0, on_err)
 
@@ -465,11 +467,13 @@ class PitAuditProApp:
 
                 self.root.after(0, on_done)
             except Exception as exc:
-                def on_err() -> None:
+                err_msg = str(exc)
+
+                def on_err(msg: str = err_msg) -> None:
                     self.btn_export.config(state=tk.NORMAL)
                     self.btn_reconcile_excel.config(state=tk.NORMAL)
                     self.lbl_status.config(text="Lỗi khi đối chiếu NPT!")
-                    messagebox.showerror("Lỗi", f"Không thể đối chiếu NPT:\n{exc}")
+                    messagebox.showerror("Lỗi", f"Không thể đối chiếu NPT:\n{msg}")
 
                 self.root.after(0, on_err)
 
