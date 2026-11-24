@@ -15,9 +15,11 @@ import csv
 import datetime
 import io
 import os
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import openpyxl
 
@@ -84,10 +86,107 @@ def _read_xlsx(file_path: str) -> Dict[str, List[List[Any]]]:
     return out
 
 
+def _inspect_ole2_kind(file_path: str) -> str:
+    """Phân loại file OLE2 bằng olefile để xác định nguyên nhân nếu xlrd không đọc được."""
+    try:
+        import olefile
+
+        with olefile.OleFileIO(file_path) as ole:
+            entries = {"/".join(e).lower() for e in ole.listdir()}
+            if any("encryptedpackage" in e for e in entries):
+                return "encrypted_xlsx"
+            if any("worddocument" in e for e in entries):
+                return "word_doc"
+            if any("powerpoint document" in e for e in entries):
+                return "ppt_doc"
+            if any(e in ("workbook", "book") for e in entries):
+                return "xls_biff"
+    except Exception:
+        pass
+    return "unknown_ole2"
+
+
+def _read_via_excel_com(file_path: str) -> Optional[Dict[str, List[List[Any]]]]:
+    """
+    Dự phòng trên Windows: dùng Microsoft Excel (nếu máy có cài) để mở file ở chế độ chỉ đọc
+    (xử lý được file .xlsx mã hóa mặc định VelvetSweatshop / Read-Only Recommended hoặc .xls OLE2 đặc thù)
+    rồi lưu bản tạm .xlsx để openpyxl đọc sạch 100%.
+    """
+    if os.name != "nt":
+        return None
+    abs_src = os.path.abspath(file_path)
+    tmp_dir = tempfile.mkdtemp(prefix="pit_xlconv_")
+    tmp_xlsx = os.path.join(tmp_dir, "converted.xlsx")
+    ps_src = abs_src.replace("'", "''")
+    ps_dst = tmp_xlsx.replace("'", "''")
+    ps_script = (
+        "$excel = $null; $wb = $null; "
+        "try { "
+        "$excel = New-Object -ComObject Excel.Application; "
+        "$excel.Visible = $false; $excel.DisplayAlerts = $false; "
+        "$wb = $excel.Workbooks.Open('" + ps_src + "', 0, $true, 5, '', '', $true); "
+        "$wb.SaveAs('" + ps_dst + "', 51); "
+        "$wb.Close($false); "
+        "} finally { "
+        "if ($excel -ne $null) { $excel.Quit(); [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null } "
+        "}"
+    )
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if res.returncode == 0 and os.path.isfile(tmp_xlsx):
+            return _read_xlsx(tmp_xlsx)
+    except Exception:
+        pass
+    finally:
+        try:
+            if os.path.isfile(tmp_xlsx):
+                os.remove(tmp_xlsx)
+            if os.path.isdir(tmp_dir):
+                os.rmdir(tmp_dir)
+        except Exception:
+            pass
+    return None
+
+
 def _read_xls_biff(file_path: str) -> Dict[str, List[List[Any]]]:
     import xlrd
 
-    book = xlrd.open_workbook(file_path)
+    try:
+        book = xlrd.open_workbook(file_path)
+    except Exception as exc:
+        fname = os.path.basename(file_path)
+        kind = _inspect_ole2_kind(file_path)
+        if kind == "word_doc":
+            raise ValueError(
+                f"File '{fname}' thực chất là tài liệu Word (.doc) bị đổi đuôi thành Excel nên không thể đọc bảng tính."
+            ) from exc
+        if kind == "ppt_doc":
+            raise ValueError(
+                f"File '{fname}' thực chất là file PowerPoint (.ppt) chứ không phải bảng tính Excel."
+            ) from exc
+
+        # Thử mở dự phòng bằng Microsoft Excel COM (xử lý được file .xlsx mã hóa mặc định / .xls OLE2 đặc thù)
+        com_res = _read_via_excel_com(file_path)
+        if com_res is not None:
+            return com_res
+
+        if kind == "encrypted_xlsx":
+            raise ValueError(
+                f"File '{fname}' đang bị ĐẶT MẬT KHẨU BẢO VỆ (EncryptedPackage) nên phần mềm không thể đọc trực tiếp.\n"
+                f"Cách xử lý: Mở file '{fname}' bằng Excel -> gỡ mật khẩu (hoặc Save As sang file .xlsx mới không mật khẩu) rồi chạy lại."
+            ) from exc
+
+        raise ValueError(
+            f"Không đọc được file Excel '{fname}' (lỗi cấu trúc OLE2: {exc}).\n"
+            f"Cách xử lý: Mở file '{fname}' bằng Microsoft Excel rồi chọn 'Save As' -> 'Excel Workbook (*.xlsx)' mới và chọn lại file đó."
+        ) from exc
+
     out: Dict[str, List[List[Any]]] = {}
     for sheet in book.sheets():
         rows: List[List[Any]] = []
