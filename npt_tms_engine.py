@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import openpyxl
 
 from tabular_reader import read_first_sheet_rows
-from xml_05qtt_parser import Row053
+from xml_05qtt_parser import Row053, clean_mst
 
 
 def _clean_text(val: Any) -> str:
@@ -37,6 +37,29 @@ def _clean_id(val: Any) -> str:
     if s.endswith(".0") and s[:-2].isdigit():
         s = s[:-2]
     return s.replace(" ", "").upper()
+
+
+def _mst_keys(mst: str) -> List[str]:
+    c = clean_mst(mst)
+    if not c:
+        return []
+    keys = [c]
+    no_z = c.lstrip("0")
+    if no_z and no_z != c:
+        keys.append(no_z)
+    return keys
+
+
+def _is_same_mst(a: str, b: str) -> bool:
+    ca = clean_mst(a)
+    cb = clean_mst(b)
+    if not ca or not cb:
+        return False
+    if ca == cb:
+        return True
+    if ca.lstrip("0") == cb.lstrip("0"):
+        return True
+    return False
 
 
 def _norm_no_zero(val: str) -> str:
@@ -269,8 +292,8 @@ def parse_tms_npt_file(file_path: str) -> List[TmsNptRow]:
 
     out: List[TmsNptRow] = []
     for row in raw_rows[hdr_idx + 1:]:
-        mst_nnt = _clean_id(_g(row, "mst_nnt"))
-        mst_npt = _clean_id(_g(row, "mst_npt"))
+        mst_nnt = clean_mst(_g(row, "mst_nnt"))
+        mst_npt = clean_mst(_g(row, "mst_npt"))
         ten_npt = _clean_text(_g(row, "ten_npt"))
         if not mst_nnt and not mst_npt and not ten_npt:
             continue
@@ -335,6 +358,11 @@ def audit_dependents(
     - Chạy kiểm tra độ tuổi & trùng NPT ngay cả khi chưa nạp file TMS.
     - Trả về (danh sách kết quả chi tiết từng dòng, bản đồ per_nnt: mst_nnt -> (decl_m, disallowed_m)).
     """
+    # Tự động chuẩn hóa MST (bù số 0 đứng đầu nếu thiếu) cho dữ liệu TMS
+    for rec in tms_rows:
+        rec.mst_nnt = clean_mst(rec.mst_nnt)
+        rec.mst_npt = clean_mst(rec.mst_npt)
+
     by_mst: Dict[Tuple[str, str], List[TmsNptRow]] = {}
     by_doc: Dict[Tuple[str, str], List[TmsNptRow]] = {}
     by_npt_only: Dict[str, List[TmsNptRow]] = {}
@@ -342,19 +370,28 @@ def audit_dependents(
 
     for rec in tms_rows:
         if rec.mst_nnt and rec.mst_npt:
-            by_mst.setdefault((rec.mst_nnt, rec.mst_npt), []).append(rec)
+            for k_nnt in _mst_keys(rec.mst_nnt):
+                for k_npt in _mst_keys(rec.mst_npt):
+                    by_mst.setdefault((k_nnt, k_npt), []).append(rec)
         if rec.mst_nnt:
-            for d in (rec.cmnd, rec.ho_chieu):
-                if d:
-                    by_doc.setdefault((rec.mst_nnt, _norm_no_zero(d)), []).append(rec)
+            for k_nnt in _mst_keys(rec.mst_nnt):
+                for d in (rec.cmnd, rec.ho_chieu):
+                    if d:
+                        by_doc.setdefault((k_nnt, _norm_no_zero(d)), []).append(rec)
         if rec.mst_npt:
-            by_npt_only.setdefault(rec.mst_npt, []).append(rec)
+            for k_npt in _mst_keys(rec.mst_npt):
+                by_npt_only.setdefault(k_npt, []).append(rec)
         for d in (rec.cmnd, rec.ho_chieu):
             if d:
                 by_doc_only.setdefault(_norm_no_zero(d), []).append(rec)
 
     res_mst = {k: _resolve_latest(v) for k, v in by_mst.items()}
     res_doc = {k: _resolve_latest(v) for k, v in by_doc.items()}
+
+    # Tự động chuẩn hóa MST (bù số 0 đứng đầu nếu thiếu) cho toàn bộ danh sách 05-3 trước khi đối chiếu
+    for r in rows_053:
+        r.mst_nnt = clean_mst(r.mst_nnt)
+        r.mst_npt = clean_mst(r.mst_npt)
 
     # Chuẩn bị bản đồ phát hiện trùng trên 05-3 theo 3 khóa: MST NPT, Số giấy tờ, và (Họ tên + Ngày sinh)
     # Mỗi entry lưu (row_idx_in_list, mst_nnt, ym_from, ym_to)
@@ -400,9 +437,9 @@ def audit_dependents(
                     continue
                 ov = _intervals_overlap(ym_f, ym_t, o_f, o_t)
                 if ov > 0:
-                    if o_mst_nnt and r.mst_nnt and o_mst_nnt != r.mst_nnt:
-                        other_nnts_053.add(o_mst_nnt)
-                    elif o_mst_nnt == r.mst_nnt:
+                    if o_mst_nnt and r.mst_nnt and not _is_same_mst(o_mst_nnt, r.mst_nnt):
+                        other_nnts_053.add(clean_mst(o_mst_nnt))
+                    elif _is_same_mst(o_mst_nnt, r.mst_nnt):
                         same_nnt_overlap = max(same_nnt_overlap, ov)
 
         if same_nnt_overlap > 0:
@@ -414,15 +451,18 @@ def audit_dependents(
         if tms_rows and ym_f and ym_t:
             tms_other_nnts: Set[str] = set()
             candidates: List[TmsNptRow] = []
-            if r.mst_npt and r.mst_npt in by_npt_only:
-                candidates.extend(by_npt_only[r.mst_npt])
+            if r.mst_npt:
+                for k_npt in _mst_keys(r.mst_npt):
+                    if k_npt in by_npt_only:
+                        candidates.extend(by_npt_only[k_npt])
             if r.so_gt and _norm_no_zero(r.so_gt) in by_doc_only:
                 candidates.extend(by_doc_only[_norm_no_zero(r.so_gt)])
             # Gom theo từng MST NNT khác và lấy bản hiệu lực mới nhất của NNT đó
             other_grouped: Dict[str, List[TmsNptRow]] = {}
             for cand in candidates:
-                if cand.mst_nnt and cand.mst_nnt != r.mst_nnt:
-                    other_grouped.setdefault(cand.mst_nnt, []).append(cand)
+                cand_nnt = clean_mst(cand.mst_nnt)
+                if cand_nnt and not _is_same_mst(cand_nnt, r.mst_nnt):
+                    other_grouped.setdefault(cand_nnt, []).append(cand)
             for o_mst, o_recs in other_grouped.items():
                 o_eff = _resolve_latest(o_recs)
                 if _intervals_overlap(ym_f, ym_t, o_eff.tu_thang, o_eff.den_thang) > 0:
@@ -435,10 +475,19 @@ def audit_dependents(
 
         # 3. ĐỐI CHIẾU THỜI GIAN & TRẠNG THÁI VỚI TMS
         matched: Optional[TmsNptRow] = None
-        if r.mst_nnt and r.mst_npt and (r.mst_nnt, r.mst_npt) in res_mst:
-            matched = res_mst[(r.mst_nnt, r.mst_npt)]
-        elif r.mst_nnt and r.so_gt and (r.mst_nnt, _norm_no_zero(r.so_gt)) in res_doc:
-            matched = res_doc[(r.mst_nnt, _norm_no_zero(r.so_gt))]
+        if r.mst_nnt and r.mst_npt:
+            for k_nnt in _mst_keys(r.mst_nnt):
+                for k_npt in _mst_keys(r.mst_npt):
+                    if (k_nnt, k_npt) in res_mst:
+                        matched = res_mst[(k_nnt, k_npt)]
+                        break
+                if matched:
+                    break
+        if matched is None and r.mst_nnt and r.so_gt:
+            for k_nnt in _mst_keys(r.mst_nnt):
+                if (k_nnt, _norm_no_zero(r.so_gt)) in res_doc:
+                    matched = res_doc[(k_nnt, _norm_no_zero(r.so_gt))]
+                    break
 
         reasons: List[str] = []
         tms_f_s = ""
@@ -448,13 +497,24 @@ def audit_dependents(
 
         if tms_rows:
             if matched is None:
-                if r.mst_npt and r.mst_npt in by_npt_only:
-                    others = sorted({x.mst_nnt for x in by_npt_only[r.mst_npt] if x.mst_nnt != r.mst_nnt})
-                    reasons.append(f"ĐĂNG KÝ CHO NNT KHÁC ({', '.join(others[:2])})")
+                cands: List[TmsNptRow] = []
+                if r.mst_npt:
+                    for k_npt in _mst_keys(r.mst_npt):
+                        if k_npt in by_npt_only:
+                            cands.extend(by_npt_only[k_npt])
+                if cands:
+                    same_nnt_recs = [x for x in cands if _is_same_mst(x.mst_nnt, r.mst_nnt)]
+                    if same_nnt_recs:
+                        matched = _resolve_latest(same_nnt_recs)
+                    else:
+                        others = sorted({clean_mst(x.mst_nnt) for x in cands if not _is_same_mst(x.mst_nnt, r.mst_nnt)})
+                        reasons.append(f"ĐĂNG KÝ CHO NNT KHÁC ({', '.join(others[:2])})")
+                        valid_m = 0
                 else:
                     reasons.append("CHƯA ĐĂNG KÝ TRÊN HỆ THỐNG")
-                valid_m = 0
-            else:
+                    valid_m = 0
+
+            if matched is not None:
                 tms_f_s = fmt_ym(matched.tu_thang)
                 tms_t_s = fmt_ym(matched.den_thang) if matched.den_thang else "Còn hiệu lực"
                 tms_st_s = f"{matched.ma_tt} - {matched.trang_thai}".strip(" -")
@@ -498,8 +558,9 @@ def audit_dependents(
                 is_ok=is_ok,
             )
         )
-        if r.mst_nnt:
-            acc = per_nnt.setdefault(r.mst_nnt, [0, 0])
+        nnt_key = clean_mst(r.mst_nnt)
+        if nnt_key:
+            acc = per_nnt.setdefault(nnt_key, [0, 0])
             acc[0] += decl_m
             acc[1] += disallowed_m
 

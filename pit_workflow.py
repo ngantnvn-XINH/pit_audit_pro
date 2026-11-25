@@ -26,7 +26,7 @@ from ledger_payroll_scanner import FlaggedCostEntry, LedgerAuditSummary, scan_ac
 from npt_tms_engine import TmsNptRow, audit_dependents, parse_tms_npt_file, parse_ym
 from pit_tax_rules import get_policy_for_year
 from tax_parser import TaxDeclaration
-from xml_05qtt_parser import Row053
+from xml_05qtt_parser import Row053, clean_mst
 
 
 SHEET_NPT_SUMMARY = "DoiChieu_NPT"
@@ -122,12 +122,24 @@ def reconcile_053_inplace(
 
     for r in range(4, ws_053.max_row + 1):
         ten_nnt = _clean_text(ws_053.cell(r, 2).value)
-        mst_nnt = _clean_id(ws_053.cell(r, 3).value)
+        raw_mst_nnt = ws_053.cell(r, 3).value
+        mst_nnt = clean_mst(raw_mst_nnt)
         ten_npt = _clean_text(ws_053.cell(r, 4).value)
         if not mst_nnt and not ten_npt:
             continue
         if "TỔNG CỘNG" in (str(ws_053.cell(r, 1).value or "") + " " + ten_nnt).upper():
             continue
+        raw_mst_npt = ws_053.cell(r, 6).value
+        mst_npt = clean_mst(raw_mst_npt)
+
+        # Tự động cập nhật lại MST trên sheet 05-3 nếu bị thiếu số 0 ở đầu (định dạng Text @)
+        if mst_nnt and str(raw_mst_nnt or "").strip() != mst_nnt:
+            c3 = ws_053.cell(r, 3, mst_nnt)
+            c3.number_format = "@"
+        if mst_npt and str(raw_mst_npt or "").strip() != mst_npt:
+            c6 = ws_053.cell(r, 6, mst_npt)
+            c6.number_format = "@"
+
         tu_t = _clean_text(ws_053.cell(r, 10).value)
         den_t = _clean_text(ws_053.cell(r, 11).value)
         if detected_year is None:
@@ -142,7 +154,7 @@ def reconcile_053_inplace(
                 mst_nnt=mst_nnt,
                 ho_ten_npt=ten_npt,
                 ngay_sinh=_clean_text(ws_053.cell(r, 5).value),
-                mst_npt=_clean_id(ws_053.cell(r, 6).value),
+                mst_npt=mst_npt,
                 loai_gt=_clean_text(ws_053.cell(r, 7).value),
                 so_gt=_clean_id(ws_053.cell(r, 8).value),
                 quan_he=_clean_text(ws_053.cell(r, 9).value),

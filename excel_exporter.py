@@ -52,6 +52,7 @@ from tncn_templates import (
     MERGES_05_2,
     MERGES_05_3,
 )
+from xml_05qtt_parser import clean_mst
 
 HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
 HEADER_FONT = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
@@ -89,7 +90,7 @@ def write_cell_formatted(cell: openpyxl.cell.Cell, val: Any, is_mst: bool = Fals
     cell.border = THIN_BORDER
 
     if is_mst:
-        cell.value = str(val) if val is not None else ""
+        cell.value = clean_mst(val) if val is not None else ""
         cell.number_format = "@"
         cell.alignment = Alignment(horizontal="left", vertical="center")
         return

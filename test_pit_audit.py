@@ -377,6 +377,109 @@ class TestPitAuditPro(unittest.TestCase):
             self.assertEqual(recs2[0].mst_npt, "8900000002")
             self.assertEqual(recs2[0].den_thang, (2024, 6))
 
+    def test_v14_auto_pad_leading_zero_mst_reconciliation(self) -> None:
+        """Kiểm thử tự động bù số 0 ở đầu MST khi đối chiếu NPT:
+        - Xử lý triệt để trường hợp Excel làm mất số 0 ở đầu MST NNT hoặc MST NPT (9 số thành 10 số).
+        - Đối chiếu khớp 100%, không nói người ta sai khi dữ liệu thực tế khớp.
+        - Tự động sửa lại định dạng Text @ và bù số 0 trên sheet 05-3."""
+        from npt_tms_engine import audit_dependents, parse_tms_npt_file
+        from pit_workflow import reconcile_053_inplace
+        from xml_05qtt_parser import Row053, clean_mst
+
+        # 1. Kiểm tra hàm clean_mst trên nhiều định dạng
+        self.assertEqual(clean_mst("101234567"), "0101234567")
+        self.assertEqual(clean_mst(101234567), "0101234567")
+        self.assertEqual(clean_mst("101234567.0"), "0101234567")
+        self.assertEqual(clean_mst(101234567.0), "0101234567")
+        self.assertEqual(clean_mst("0101234567"), "0101234567")
+        self.assertEqual(clean_mst("8000000001"), "8000000001")
+        self.assertEqual(clean_mst("890000001"), "0890000001")
+        self.assertEqual(clean_mst("101234567-001"), "0101234567-001")
+        self.assertEqual(clean_mst("101234567-1"), "0101234567-001")
+        self.assertEqual(clean_mst("101234567001"), "0101234567001")
+        self.assertEqual(clean_mst(None), "")
+        self.assertEqual(clean_mst(""), "")
+        self.assertEqual(clean_mst("0"), "")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 2. File TMS bị thiếu số 0 ở đầu MST NNT (100000001 thay vì 0100000001) và MST NPT (890000001 thay vì 0890000001)
+            tms_p = os.path.join(tmpdir, "tms_npt_missing_zero.csv")
+            tms_csv = (
+                "19.11.2026 HIỂN THỊ DANH SÁCH ĐỘNG\n\nDanh sách kết quả\n"
+                "Ngày tạo,Ngày TĐ,MST NNT,Tên NNT,MST NPT,Tên NPT,Tên trạng thái NPT,Ngày sinh,CMND,Quan hệ,Tháng,Tháng,Mẫu BK/TK,Mã trạng t\n"
+                "10.01.2024,10.07.2024,100000001,Nguyễn Văn A,890000001,Nguyễn Bé Một,NNT đang hoạt động,01.01.2018,079218000001,Con,12024,122024,16-TH,00\n"
+            )
+            with open(tms_p, "w", encoding="utf-8") as f:
+                f.write(tms_csv)
+
+            tms_rows = parse_tms_npt_file(tms_p)
+            self.assertEqual(len(tms_rows), 1)
+            # Tự động bù số 0 khi parse
+            self.assertEqual(tms_rows[0].mst_nnt, "0100000001")
+            self.assertEqual(tms_rows[0].mst_npt, "0890000001")
+
+            # 3. Danh sách 05-3: Tờ khai đầy đủ 10 số (0100000001 & 0890000001) đối chiếu với TMS ban đầu bị thiếu số 0
+            row_053_a = Row053(
+                stt=1,
+                ho_ten_nnt="Nguyễn Văn A",
+                mst_nnt="0100000001",
+                ho_ten_npt="Nguyễn Bé Một",
+                ngay_sinh="01/01/2018",
+                mst_npt="0890000001",
+                loai_gt="CCCD",
+                so_gt="079218000001",
+                quan_he="Con",
+                tu_thang="01/2024",
+                den_thang="12/2024",
+            )
+            res_a, per_a = audit_dependents([row_053_a], tms_rows, tax_year=2024)
+            self.assertTrue(res_a[0].is_ok, f"Đối chiếu phải KHỚP nhưng bị báo lỗi: {res_a[0].status}")
+            self.assertEqual(res_a[0].status, "KHỚP")
+            self.assertEqual(res_a[0].valid_months, 12)
+            self.assertEqual(res_a[0].disallowed_months, 0)
+            self.assertIn("0100000001", per_a)
+
+            # 4. Ngược lại: Bảng kê 05-3 bị thiếu số 0 (hoặc dạng số nguyên) đối chiếu với TMS có đủ số 0
+            row_053_b = Row053(
+                stt=1,
+                ho_ten_nnt="Nguyễn Văn A",
+                mst_nnt="100000001",  # Thiếu số 0
+                ho_ten_npt="Nguyễn Bé Một",
+                ngay_sinh="01/01/2018",
+                mst_npt="890000001",   # Thiếu số 0
+                loai_gt="CCCD",
+                so_gt="079218000001",
+                quan_he="Con",
+                tu_thang="01/2024",
+                den_thang="12/2024",
+            )
+            res_b, per_b = audit_dependents([row_053_b], tms_rows, tax_year=2024)
+            self.assertTrue(res_b[0].is_ok, f"05-3 thiếu số 0 vẫn phải KHỚP: {res_b[0].status}")
+            self.assertEqual(res_b[0].status, "KHỚP")
+            self.assertEqual(row_053_b.mst_nnt, "0100000001")
+            self.assertEqual(row_053_b.mst_npt, "0890000001")
+
+            # 5. Đối chiếu trực tiếp trên workbook Excel (sheet 05-3 chứa số nguyên mất số 0)
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "05-3"
+            ws.append(["STT", "Họ tên NNT", "MST NNT", "Họ tên NPT", "Ngày sinh", "MST NPT", "Loại GT", "Số GT", "Quan hệ", "Từ tháng", "Đến tháng"])
+            ws.append(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"])
+            ws.append(["[1]", "[2]", "[3]", "[4]", "[5]", "[6]", "[7]", "[8]", "[9]", "[10]", "[11]"])
+            # Dòng 4: MST NNT và MST NPT lưu dạng số (int) mất số 0
+            ws.append([1, "Nguyễn Văn A", 100000001, "Nguyễn Bé Một", "01/01/2018", 890000001, "CCCD", "079218000001", "Con", "01/2024", "12/2024"])
+
+            st = reconcile_053_inplace(wb, tms_rows, tax_year=2024)
+            self.assertEqual(st["matched"], 1)
+            self.assertEqual(st["total_diff_months"], 0)
+            # Ô MST trên sheet 05-3 phải được tự động sửa lại đủ 10 số và format Text @
+            self.assertEqual(ws.cell(4, 3).value, "0100000001")
+            self.assertEqual(ws.cell(4, 3).number_format, "@")
+            self.assertEqual(ws.cell(4, 6).value, "0890000001")
+            self.assertEqual(ws.cell(4, 6).number_format, "@")
+            # Cột V (kết quả đối chiếu tổng hợp) phải là KHỚP
+            self.assertEqual(ws.cell(4, 22).value, "KHỚP")
+
 
 if __name__ == "__main__":
     unittest.main()

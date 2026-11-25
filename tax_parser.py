@@ -146,12 +146,11 @@ def parse_value(val: Optional[str]) -> Any:
 
 
 def normalize_mst(val: Optional[str]) -> str:
-    """Chuẩn hóa mã số thuế: giữ chuỗi sạch, bảo toàn số 0 đứng đầu."""
+    """Chuẩn hóa mã số thuế: giữ chuỗi sạch, bảo toàn và tự động bù số 0 đứng đầu nếu thiếu."""
     if not val:
         return ""
-    s = re.sub(r"[\s\u00a0]", "", str(val))
-    s = re.sub(r"[–—−‐]", "-", s)
-    return s
+    from xml_05qtt_parser import clean_mst
+    return clean_mst(val)
 
 
 def classify_tax_type(ma_tkhai: str, ten_tkhai: str) -> str:

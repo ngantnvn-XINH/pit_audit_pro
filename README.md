@@ -13,6 +13,7 @@
   - Hỗ trợ thuế suất toàn phần `10%` (không HĐLĐ ≥ 2 triệu/lần), `20%` (không cư trú), trần tiền thuê nhà `15%` (TT 92/2015).
 - **Đối chiếu Người phụ thuộc (`05-3` vs TMS) liên thông tính lại `05-1`:**
   - Đọc file kết xuất TMS (`.xlsx` / `.csv`), hợp nhất lịch sử báo tăng/báo giảm, hỗ trợ cả MST 10 số & Số định danh 12 số (TT 86/2024/TT-BTC).
+  - **Tự động bù số 0 đứng đầu MST (v1.1+):** Khắc phục triệt để lỗi người dùng mở file NPT bằng Excel làm mất số 0 ở đầu (9 số thành 10 số, 12 số thành 13 số, MST chi nhánh có gạch nối). Hệ thống tự động bù số 0 trước khi so sánh đa chiều, tự động định dạng chuẩn Text `@` trên sheet 05-3, đảm bảo đối chiếu khớp 100% đúng thực tế, không kết luận sai khi người nộp thuế thực tế đã đăng ký hợp lệ.
   - Tự động đẩy **số tháng NPT bị loại trừ** của từng NNT bằng công thức `SUMIF` sang sheet `TinhLai_05_1` để **tính lại đúng số thuế TNCN phải nộp thêm theo biểu lũy tiến** của chính cá nhân đó.
 - **Đối chiếu Quỹ lương (`TK 334`, `338`, `3335`, `353`) & Quét rủi ro Sổ chi phí (`TK 641, 642, 622, 627, 154, 353, 811`):**
   - Tự động phát hiện 6 nhóm khoản chi có nguy cơ chịu thuế TNCN bỏ sót ngoài bảng lương (tiền thuê nhà, thưởng/phúc lợi đích danh, BH nhân thọ/thẻ hội viên, vé máy bay/học phí, phụ cấp vượt định mức, chi cá nhân ngoài HĐLĐ ≥ 2 triệu chưa khấu trừ 10%).

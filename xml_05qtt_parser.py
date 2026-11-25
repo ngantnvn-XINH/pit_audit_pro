@@ -35,6 +35,52 @@ def _clean_id(val: Any) -> str:
     return s.replace(" ", "").upper()
 
 
+def clean_mst(val: Any) -> str:
+    """
+    Chuẩn hóa Mã số thuế (MST NNT, MST NPT, MST cơ quan chi trả):
+    - Chuyển thành chuỗi, loại bỏ khoảng trắng, ký tự rác unicode (\\xa0, \\u200b).
+    - Cắt bỏ phần thập phân .0 sinh ra từ Excel dạng số/float.
+    - Chuẩn hóa các dấu gạch ngang (–, —, −) thành '-'.
+    - TỰ ĐỘNG BÙ SỐ 0 ĐỨNG ĐẦU nếu bị thiếu do Excel/CSV lưu dạng số (General/Number):
+      * Nếu có 9 chữ số thuần túy -> bù '0' ở đầu thành 10 chữ số (VD: 101234567 -> 0101234567).
+      * Nếu có 7-8 chữ số thuần túy -> bù '0' ở đầu cho đủ 10 chữ số (zfill(10)).
+      * Nếu có 12 chữ số thuần túy -> bù '0' ở đầu thành 13 chữ số (chi nhánh).
+      * Nếu có dấu gạch ngang dạng MST chi nhánh (VD: 101234567-001) -> bù '0' ở đầu phần 9 số thành 10 số (0101234567-001).
+    - Trả về rỗng nếu không có dữ liệu hoặc chuỗi toàn số 0.
+    """
+    if val is None:
+        return ""
+    s = str(val).replace("\xa0", " ").replace("\u200b", "").strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    s = s.replace(" ", "").upper()
+    s = re.sub(r"[–—−‐]", "-", s)
+    if not s or s.replace("-", "").strip("0") == "":
+        return ""
+
+    if "-" in s:
+        parts = s.split("-", 1)
+        p0, p1 = parts[0], parts[1]
+        if p0.isdigit():
+            if len(p0) == 9:
+                p0 = "0" + p0
+            elif 7 <= len(p0) < 10:
+                p0 = p0.zfill(10)
+        if p1.isdigit() and len(p1) < 3:
+            p1 = p1.zfill(3)
+        return f"{p0}-{p1}"
+
+    if s.isdigit():
+        if len(s) == 9:
+            return "0" + s
+        elif 7 <= len(s) < 10:
+            return s.zfill(10)
+        elif len(s) == 12:
+            return "0" + s
+
+    return s
+
+
 def _to_float(val: Any) -> float:
     if val is None or isinstance(val, bool):
         return 0.0
@@ -160,7 +206,7 @@ def parse_05qtt_xml(xml_path: str) -> PitDeclarationData:
     data = PitDeclarationData(
         source_path=xml_path,
         year=yr,
-        mst_cqct=_clean_id(_find_first_text(root, ["mst"])),
+        mst_cqct=clean_mst(_find_first_text(root, ["mst"])),
         ten_cqct=_find_first_text(root, ["tenNNT"]),
         so_lan=so_lan,
         ngay_lap=_find_first_text(root, ["ngayLapTKhai"]),
@@ -174,7 +220,7 @@ def parse_05qtt_xml(xml_path: str) -> PitDeclarationData:
             for item in el.iter():
                 if _strip_ns(item.tag).lower() in ("ctietcnhan", "cnhan"):
                     ho_ten = _child_text(item, ["ct07", "hoVaTen"])
-                    mst = _clean_id(_child_text(item, ["ct08", "mst"]))
+                    mst = clean_mst(_child_text(item, ["ct08", "mst"]))
                     if not ho_ten and not mst:
                         continue
                     idx += 1
@@ -219,7 +265,7 @@ def parse_05qtt_xml(xml_path: str) -> PitDeclarationData:
             for item in el.iter():
                 if _strip_ns(item.tag).lower() in ("ctietcnhan", "cnhan"):
                     ho_ten = _child_text(item, ["ct07", "hoVaTen"])
-                    mst = _clean_id(_child_text(item, ["ct08", "mst"]))
+                    mst = clean_mst(_child_text(item, ["ct08", "mst"]))
                     if not ho_ten and not mst:
                         continue
                     idx += 1
@@ -239,7 +285,7 @@ def parse_05qtt_xml(xml_path: str) -> PitDeclarationData:
             for item in el.iter():
                 if _strip_ns(item.tag).lower() in ("ctietnpt", "ctietcnhan", "npt"):
                     ten_nnt = _child_text(item, ["ct07", "hoVaTenNNT"])
-                    mst_nnt = _clean_id(_child_text(item, ["ct08", "mstNNT"]))
+                    mst_nnt = clean_mst(_child_text(item, ["ct08", "mstNNT"]))
                     ten_npt = _child_text(item, ["ct09", "hoVaTenNPT"])
                     if not ten_npt and not mst_nnt:
                         continue
@@ -251,7 +297,7 @@ def parse_05qtt_xml(xml_path: str) -> PitDeclarationData:
                             mst_nnt=mst_nnt,
                             ho_ten_npt=ten_npt,
                             ngay_sinh=_child_text(item, ["ct10", "ngaySinh"]),
-                            mst_npt=_clean_id(_child_text(item, ["ct11", "mstNPT"])),
+                            mst_npt=clean_mst(_child_text(item, ["ct11", "mstNPT"])),
                             loai_gt=_child_text(item, ["ct12", "loaiGiayTo"]),
                             so_gt=_clean_id(_child_text(item, ["ct13", "soGiayTo"])),
                             quan_he=_child_text(item, ["ct14", "quanHe"]),
@@ -276,7 +322,7 @@ def parse_05qtt_excel(excel_path: str) -> PitDeclarationData:
         idx = 0
         for r in range(4, ws.max_row + 1):
             ho_ten = _clean_str(ws.cell(r, 2).value)
-            mst = _clean_id(ws.cell(r, 3).value)
+            mst = clean_mst(ws.cell(r, 3).value)
             if not ho_ten and not mst:
                 continue
             if "TỔNG CỘNG" in (str(ws.cell(r, 1).value or "") + " " + ho_ten).upper():
@@ -309,7 +355,7 @@ def parse_05qtt_excel(excel_path: str) -> PitDeclarationData:
         idx = 0
         for r in range(4, ws.max_row + 1):
             ho_ten = _clean_str(ws.cell(r, 2).value)
-            mst = _clean_id(ws.cell(r, 3).value)
+            mst = clean_mst(ws.cell(r, 3).value)
             if not ho_ten and not mst:
                 continue
             if "TỔNG CỘNG" in (str(ws.cell(r, 1).value or "") + " " + ho_ten).upper():
@@ -334,7 +380,7 @@ def parse_05qtt_excel(excel_path: str) -> PitDeclarationData:
         idx = 0
         for r in range(4, ws.max_row + 1):
             ten_nnt = _clean_str(ws.cell(r, 2).value)
-            mst_nnt = _clean_id(ws.cell(r, 3).value)
+            mst_nnt = clean_mst(ws.cell(r, 3).value)
             ten_npt = _clean_str(ws.cell(r, 4).value)
             if not ten_npt and not mst_nnt:
                 continue
@@ -353,7 +399,7 @@ def parse_05qtt_excel(excel_path: str) -> PitDeclarationData:
                     mst_nnt=mst_nnt,
                     ho_ten_npt=ten_npt,
                     ngay_sinh=_clean_str(ws.cell(r, 5).value),
-                    mst_npt=_clean_id(ws.cell(r, 6).value),
+                    mst_npt=clean_mst(ws.cell(r, 6).value),
                     loai_gt=_clean_str(ws.cell(r, 7).value),
                     so_gt=_clean_id(ws.cell(r, 8).value),
                     quan_he=_clean_str(ws.cell(r, 9).value),
