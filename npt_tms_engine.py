@@ -112,6 +112,20 @@ def ym_idx(ym: Tuple[int, int]) -> int:
     return ym[0] * 12 + (ym[1] - 1)
 
 
+def _idx_to_ym(idx: int) -> Tuple[int, int]:
+    return (idx // 12, (idx % 12) + 1)
+
+
+def _normalize_ym_range(
+    f: Optional[Tuple[int, int]],
+    t: Optional[Tuple[int, int]],
+) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+    """Tự động đảo lại nếu file TMS bị ngược Từ tháng > Đến tháng (VD: 01/2025 -> 01/2022 thành 01/2022 -> 01/2025)."""
+    if f is not None and t is not None and ym_idx(f) > ym_idx(t):
+        return (t, f)
+    return (f, t)
+
+
 def parse_date_flexible(val: Any) -> Optional[datetime.date]:
     if isinstance(val, datetime.datetime):
         return val.date()
@@ -267,7 +281,7 @@ def parse_tms_npt_file(file_path: str) -> List[TmsNptRow]:
                     cmap.setdefault("cmnd", c_i)
                 elif "quan hệ" in h:
                     cmap.setdefault("quan_he", c_i)
-                elif h in ("tháng", "tháng", "từ tháng", "đến tháng"):
+                elif h in ("tháng", "tháng") or "từ tháng" in h or "đến tháng" in h:
                     thang_cols.append(c_i)
                 elif "mẫu bk" in h or "mẫu tk" in h:
                     cmap.setdefault("mau_tk", c_i)
@@ -299,6 +313,10 @@ def parse_tms_npt_file(file_path: str) -> List[TmsNptRow]:
             continue
         nt = _clean_text(_g(row, "ngay_tao"))
         ntd = _clean_text(_g(row, "ngay_td"))
+        tu_thang, den_thang = _normalize_ym_range(
+            parse_ym(_g(row, "tu_thang")),
+            parse_ym(_g(row, "den_thang")),
+        )
         out.append(
             TmsNptRow(
                 ngay_tao=nt,
@@ -313,8 +331,8 @@ def parse_tms_npt_file(file_path: str) -> List[TmsNptRow]:
                 cmnd=_clean_id(_g(row, "cmnd")),
                 ho_chieu=_clean_id(_g(row, "ho_chieu")),
                 quan_he=_clean_text(_g(row, "quan_he")),
-                tu_thang=parse_ym(_g(row, "tu_thang")),
-                den_thang=parse_ym(_g(row, "den_thang")),
+                tu_thang=tu_thang,
+                den_thang=den_thang,
                 mau_tk=_clean_text(_g(row, "mau_tk")),
                 gks_so=_clean_text(_g(row, "gks_so")),
                 sort_date=max(_parse_dmy(nt), _parse_dmy(ntd)),
@@ -332,6 +350,70 @@ def _resolve_latest(recs: List[TmsNptRow]) -> TmsNptRow:
     return pool_s[-1]
 
 
+def _resolve_tms_intervals(
+    recs: List[TmsNptRow],
+) -> Tuple[TmsNptRow, List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]]]:
+    """
+    Hợp nhất lịch sử đăng ký nhiều dòng của cùng 1 cặp (NNT, NPT) trên TMS:
+    1. Nếu dòng nào bị ngược Từ tháng > Đến tháng (VD: 01/2025 -> 01/2022) thì tự động đảo lại thành 01/2022 -> 01/2025.
+    2. Cùng 1 mốc Từ tháng (VD: báo tăng 01/2020 -> trống, sau đó báo giảm 01/2020 -> 06/2022): giữ bản cập nhật mới nhất.
+    3. Nếu có nhiều dòng qua các năm mà dòng trước để trống Đến tháng (VD: 01/2018->trống, 01/2019->trống, ..., 01/2023->12/2023):
+       dòng trống trung gian được nối liền đến sát tháng bắt đầu của dòng kế tiếp, và mốc cắt cuối cùng (12/2023) được giữ nguyên.
+    4. Gộp các khoảng liên tiếp hoặc chồng lấn thành danh sách khoảng đã chuẩn hóa (VD: [(01/2018, 12/2023)]).
+    """
+    latest_meta = _resolve_latest(recs)
+
+    by_start: Dict[Tuple[int, int], Tuple[datetime.date, Optional[Tuple[int, int]]]] = {}
+    for r in recs:
+        f, t = _normalize_ym_range(r.tu_thang, r.den_thang)
+        if f is None:
+            continue
+        cand_key = (r.sort_date, 1 if t is not None else 0, ym_idx(t) if t is not None else -1)
+        prev = by_start.get(f)
+        if prev is None:
+            by_start[f] = (r.sort_date, t)
+        else:
+            prev_sd, prev_t = prev
+            prev_key = (prev_sd, 1 if prev_t is not None else 0, ym_idx(prev_t) if prev_t is not None else -1)
+            if cand_key >= prev_key:
+                by_start[f] = (r.sort_date, t)
+
+    if not by_start:
+        return latest_meta, []
+
+    ordered: List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]] = [
+        (f, by_start[f][1]) for f in sorted(by_start.keys(), key=ym_idx)
+    ]
+
+    # Các dòng trung gian để trống Đến tháng được chặn ngay trước tháng bắt đầu của dòng kế tiếp
+    # (để 01/2018->trống, ..., 01/2023->12/2023 gộp thành 01/2018->12/2023 thay vì thành vô hạn).
+    capped: List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]] = []
+    for i, (f, t) in enumerate(ordered):
+        if t is None and i + 1 < len(ordered):
+            next_f = ordered[i + 1][0]
+            cap_idx = ym_idx(next_f) - 1
+            if cap_idx >= ym_idx(f):
+                t = _idx_to_ym(cap_idx)
+            else:
+                t = f
+        capped.append((f, t))
+
+    merged: List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]] = [capped[0]]
+    for f, t in capped[1:]:
+        cur_f, cur_t = merged[-1]
+        if cur_t is None:
+            continue
+        if ym_idx(f) <= ym_idx(cur_t) + 1:
+            if t is None:
+                merged[-1] = (cur_f, None)
+            elif ym_idx(t) > ym_idx(cur_t):
+                merged[-1] = (cur_f, t)
+        else:
+            merged.append((f, t))
+
+    return latest_meta, merged
+
+
 def _intervals_overlap(
     a1: Optional[Tuple[int, int]],
     a2: Optional[Tuple[int, int]],
@@ -341,11 +423,40 @@ def _intervals_overlap(
     if a1 is None or a2 is None or b1 is None:
         return 0
     s1, e1 = ym_idx(a1), ym_idx(a2)
+    b1, b2 = _normalize_ym_range(b1, b2)
+    if b1 is None:
+        return 0
     s2 = ym_idx(b1)
     e2 = ym_idx(b2) if b2 is not None else ym_idx((9999, 12))
     if e1 < s1 or e2 < s2:
         return 0
     return max(0, min(e1, e2) - max(s1, s2) + 1)
+
+
+def _intervals_overlap_multi(
+    a1: Optional[Tuple[int, int]],
+    a2: Optional[Tuple[int, int]],
+    intervals: Sequence[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]],
+) -> int:
+    if a1 is None or a2 is None or not intervals:
+        return 0
+    total = 0
+    for b1, b2 in intervals:
+        total += _intervals_overlap(a1, a2, b1, b2)
+    return total
+
+
+def _format_tms_intervals(
+    intervals: Sequence[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]],
+) -> Tuple[str, str]:
+    if not intervals:
+        return "", ""
+    if len(intervals) == 1:
+        f, t = intervals[0]
+        return fmt_ym(f), (fmt_ym(t) if t else "Còn hiệu lực")
+    f_str = "; ".join(fmt_ym(f) for f, _ in intervals)
+    t_str = "; ".join(fmt_ym(t) if t else "Còn hiệu lực" for _, t in intervals)
+    return f_str, t_str
 
 
 def audit_dependents(
@@ -384,9 +495,6 @@ def audit_dependents(
         for d in (rec.cmnd, rec.ho_chieu):
             if d:
                 by_doc_only.setdefault(_norm_no_zero(d), []).append(rec)
-
-    res_mst = {k: _resolve_latest(v) for k, v in by_mst.items()}
-    res_doc = {k: _resolve_latest(v) for k, v in by_doc.items()}
 
     # Tự động chuẩn hóa MST (bù số 0 đứng đầu nếu thiếu) cho toàn bộ danh sách 05-3 trước khi đối chiếu
     for r in rows_053:
@@ -464,8 +572,8 @@ def audit_dependents(
                 if cand_nnt and not _is_same_mst(cand_nnt, r.mst_nnt):
                     other_grouped.setdefault(cand_nnt, []).append(cand)
             for o_mst, o_recs in other_grouped.items():
-                o_eff = _resolve_latest(o_recs)
-                if _intervals_overlap(ym_f, ym_t, o_eff.tu_thang, o_eff.den_thang) > 0:
+                _, o_intervals = _resolve_tms_intervals(o_recs)
+                if _intervals_overlap_multi(ym_f, ym_t, o_intervals) > 0:
                     tms_other_nnts.add(o_mst)
             if tms_other_nnts:
                 dup_reasons.append(f"TRÙNG NNT KHÁC TRÊN TMS (MST {', '.join(sorted(tms_other_nnts)[:2])})")
@@ -473,21 +581,24 @@ def audit_dependents(
         is_dup = len(dup_reasons) > 0
         dup_status = "; ".join(dup_reasons) if is_dup else "Không trùng"
 
-        # 3. ĐỐI CHIẾU THỜI GIAN & TRẠNG THÁI VỚI TMS
+        # 3. ĐỐI CHIẾU THỜI GIAN & TRẠNG THÁI VỚI TMS (HỢP NHẤT TOÀN BỘ LỊCH SỬ NHIỀU DÒNG)
         matched: Optional[TmsNptRow] = None
+        matched_intervals: List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]] = []
+        matched_recs_map: Dict[int, TmsNptRow] = {}
         if r.mst_nnt and r.mst_npt:
             for k_nnt in _mst_keys(r.mst_nnt):
                 for k_npt in _mst_keys(r.mst_npt):
-                    if (k_nnt, k_npt) in res_mst:
-                        matched = res_mst[(k_nnt, k_npt)]
-                        break
-                if matched:
-                    break
-        if matched is None and r.mst_nnt and r.so_gt:
+                    if (k_nnt, k_npt) in by_mst:
+                        for rec in by_mst[(k_nnt, k_npt)]:
+                            matched_recs_map[id(rec)] = rec
+        if r.mst_nnt and r.so_gt:
+            norm_doc = _norm_no_zero(r.so_gt)
             for k_nnt in _mst_keys(r.mst_nnt):
-                if (k_nnt, _norm_no_zero(r.so_gt)) in res_doc:
-                    matched = res_doc[(k_nnt, _norm_no_zero(r.so_gt))]
-                    break
+                if (k_nnt, norm_doc) in by_doc:
+                    for rec in by_doc[(k_nnt, norm_doc)]:
+                        matched_recs_map[id(rec)] = rec
+        if matched_recs_map:
+            matched, matched_intervals = _resolve_tms_intervals(list(matched_recs_map.values()))
 
         reasons: List[str] = []
         tms_f_s = ""
@@ -505,7 +616,7 @@ def audit_dependents(
                 if cands:
                     same_nnt_recs = [x for x in cands if _is_same_mst(x.mst_nnt, r.mst_nnt)]
                     if same_nnt_recs:
-                        matched = _resolve_latest(same_nnt_recs)
+                        matched, matched_intervals = _resolve_tms_intervals(same_nnt_recs)
                     else:
                         others = sorted({clean_mst(x.mst_nnt) for x in cands if not _is_same_mst(x.mst_nnt, r.mst_nnt)})
                         reasons.append(f"ĐĂNG KÝ CHO NNT KHÁC ({', '.join(others[:2])})")
@@ -515,16 +626,15 @@ def audit_dependents(
                     valid_m = 0
 
             if matched is not None:
-                tms_f_s = fmt_ym(matched.tu_thang)
-                tms_t_s = fmt_ym(matched.den_thang) if matched.den_thang else "Còn hiệu lực"
+                tms_f_s, tms_t_s = _format_tms_intervals(matched_intervals)
                 tms_st_s = f"{matched.ma_tt} - {matched.trang_thai}".strip(" -")
                 if matched.ma_tt and matched.ma_tt != "00":
                     reasons.append(f"MST NPT NGỪNG HĐ (Mã {matched.ma_tt})")
-                if matched.tu_thang is None:
+                if not matched_intervals:
                     reasons.append("CẦN KIỂM TRA (TMS THIẾU TỪ THÁNG)")
                     valid_m = 0
                 elif ym_f and ym_t:
-                    valid_m = _intervals_overlap(ym_f, ym_t, matched.tu_thang, matched.den_thang)
+                    valid_m = _intervals_overlap_multi(ym_f, ym_t, matched_intervals)
                     if valid_m < decl_m:
                         reasons.append(
                             "NGOÀI THỜI GIAN ĐĂNG KÝ TMS" if valid_m == 0
