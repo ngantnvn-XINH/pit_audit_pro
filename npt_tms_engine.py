@@ -354,12 +354,14 @@ def _resolve_tms_intervals(
     recs: List[TmsNptRow],
 ) -> Tuple[TmsNptRow, List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]]]:
     """
-    Hợp nhất lịch sử đăng ký nhiều dòng của cùng 1 cặp (NNT, NPT) trên TMS:
+    Hợp nhất lịch sử đăng ký nhiều dòng của cùng 1 cặp (NNT, NPT) trên TMS thành 1 khoảng xuyên suốt:
     1. Nếu dòng nào bị ngược Từ tháng > Đến tháng (VD: 01/2025 -> 01/2022) thì tự động đảo lại thành 01/2022 -> 01/2025.
     2. Cùng 1 mốc Từ tháng (VD: báo tăng 01/2020 -> trống, sau đó báo giảm 01/2020 -> 06/2022): giữ bản cập nhật mới nhất.
-    3. Nếu có nhiều dòng qua các năm mà dòng trước để trống Đến tháng (VD: 01/2018->trống, 01/2019->trống, ..., 01/2023->12/2023):
-       dòng trống trung gian được nối liền đến sát tháng bắt đầu của dòng kế tiếp, và mốc cắt cuối cùng (12/2023) được giữ nguyên.
-    4. Gộp các khoảng liên tiếp hoặc chồng lấn thành danh sách khoảng đã chuẩn hóa (VD: [(01/2018, 12/2023)]).
+    3. Quy tắc gộp xuyên suốt nhiều lần ĐK:
+       - Mốc đầu (Từ tháng) = Từ tháng sớm nhất trong lịch sử ĐK.
+       - Mốc cuối (Đến tháng) = Đến tháng của lần ĐK sau cùng theo thứ tự thời gian:
+         * VD 1: ĐK 01/2023–01/2024 và ĐK 01/2025–(trống) -> tính 01/2023 đến chưa có thời hạn kết thúc (None).
+         * VD 2: ĐK 01/2022–(trống) và ĐK 01/2023–12/2023 -> tính 01/2022 đến 12/2023 (đã có kỳ kết thúc).
     """
     latest_meta = _resolve_latest(recs)
 
@@ -385,33 +387,9 @@ def _resolve_tms_intervals(
         (f, by_start[f][1]) for f in sorted(by_start.keys(), key=ym_idx)
     ]
 
-    # Các dòng trung gian để trống Đến tháng được chặn ngay trước tháng bắt đầu của dòng kế tiếp
-    # (để 01/2018->trống, ..., 01/2023->12/2023 gộp thành 01/2018->12/2023 thay vì thành vô hạn).
-    capped: List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]] = []
-    for i, (f, t) in enumerate(ordered):
-        if t is None and i + 1 < len(ordered):
-            next_f = ordered[i + 1][0]
-            cap_idx = ym_idx(next_f) - 1
-            if cap_idx >= ym_idx(f):
-                t = _idx_to_ym(cap_idx)
-            else:
-                t = f
-        capped.append((f, t))
-
-    merged: List[Tuple[Tuple[int, int], Optional[Tuple[int, int]]]] = [capped[0]]
-    for f, t in capped[1:]:
-        cur_f, cur_t = merged[-1]
-        if cur_t is None:
-            continue
-        if ym_idx(f) <= ym_idx(cur_t) + 1:
-            if t is None:
-                merged[-1] = (cur_f, None)
-            elif ym_idx(t) > ym_idx(cur_t):
-                merged[-1] = (cur_f, t)
-        else:
-            merged.append((f, t))
-
-    return latest_meta, merged
+    start_ym = ordered[0][0]
+    end_ym = ordered[-1][1]
+    return latest_meta, [(start_ym, end_ym)]
 
 
 def _intervals_overlap(

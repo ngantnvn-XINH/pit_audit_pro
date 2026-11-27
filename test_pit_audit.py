@@ -554,18 +554,34 @@ class TestPitAuditPro(unittest.TestCase):
         self.assertEqual(res_c3_25[0].valid_months, 1)
         self.assertEqual(res_c3_25[0].disallowed_months, 11)
 
-        # Case 4: Gián đoạn 2 giai đoạn (01/2018..12/2018 và 01/2021..12/2022)
+        # Case 4 (VD 1): ĐK 01/2023..01/2024 và ĐK 01/2025..(trống) -> tính xuyên suốt từ 01/2023 chưa có thời hạn kết thúc!
         tms_case4 = [
-            _mk_tms("8000000104", "8900000104", (2018, 1), (2018, 12), (2018, 1, 1)),
-            _mk_tms("8000000104", "8900000104", (2021, 1), (2022, 12), (2021, 1, 1)),
+            _mk_tms("8000000104", "8900000104", (2023, 1), (2024, 1), (2023, 1, 1)),
+            _mk_tms("8000000104", "8900000104", (2025, 1), None, (2025, 1, 1)),
         ]
-        r053_c4_2019 = Row053(1, "NNT Test", "8000000104", "NPT Test", "01/01/1955", "8900000104", "CMND", "111222336", "Cha/Mẹ", "01/2019", "12/2019")
-        res_c4_19, _ = audit_dependents([r053_c4_2019], tms_case4, tax_year=2019)
-        self.assertEqual(res_c4_19[0].valid_months, 0)
-        r053_c4_2021 = Row053(1, "NNT Test", "8000000104", "NPT Test", "01/01/1955", "8900000104", "CMND", "111222336", "Cha/Mẹ", "01/2021", "12/2021")
-        res_c4_21, _ = audit_dependents([r053_c4_2021], tms_case4, tax_year=2021)
-        self.assertTrue(res_c4_21[0].is_ok)
-        self.assertEqual(res_c4_21[0].valid_months, 12)
+        for yr in (2023, 2024, 2025):
+            r053_c4 = Row053(1, "NNT Test", "8000000104", "NPT Test", "01/01/1955", "8900000104", "CMND", "111222336", "Cha/Mẹ", f"01/{yr}", f"12/{yr}")
+            res_c4, _ = audit_dependents([r053_c4], tms_case4, tax_year=yr)
+            self.assertTrue(res_c4[0].is_ok, f"Year {yr} should be OK, got {res_c4[0].status}")
+            self.assertEqual(res_c4[0].tms_from, "01/2023")
+            self.assertEqual(res_c4[0].tms_to, "Còn hiệu lực")
+            self.assertEqual(res_c4[0].valid_months, 12)
+
+        # Case 5 (VD 2): ĐK 01/2022..(trống) và ĐK 01/2023..12/2023 -> tính 01/2022 đến 12/2023 (đã có kỳ kết thúc 12/2023)
+        tms_case5 = [
+            _mk_tms("8000000105", "8900000105", (2022, 1), None, (2022, 1, 1)),
+            _mk_tms("8000000105", "8900000105", (2023, 1), (2023, 12), (2023, 1, 1)),
+        ]
+        for yr in (2022, 2023):
+            r053_c5 = Row053(1, "NNT Test", "8000000105", "NPT Test", "01/01/1955", "8900000105", "CMND", "111222337", "Cha/Mẹ", f"01/{yr}", f"12/{yr}")
+            res_c5, _ = audit_dependents([r053_c5], tms_case5, tax_year=yr)
+            self.assertTrue(res_c5[0].is_ok)
+            self.assertEqual(res_c5[0].tms_from, "01/2022")
+            self.assertEqual(res_c5[0].tms_to, "12/2023")
+            self.assertEqual(res_c5[0].valid_months, 12)
+        r053_c5_24 = Row053(1, "NNT Test", "8000000105", "NPT Test", "01/01/1955", "8900000105", "CMND", "111222337", "Cha/Mẹ", "01/2024", "12/2024")
+        res_c5_24, _ = audit_dependents([r053_c5_24], tms_case5, tax_year=2024)
+        self.assertEqual(res_c5_24[0].valid_months, 0)
 
 
 if __name__ == "__main__":
