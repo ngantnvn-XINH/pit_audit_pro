@@ -3,7 +3,13 @@ __pycache__/
 .venv/
 venv/
 ~$*.xlsx
+*.xlsx
+*.xls
+*.csv
+*.txt
 *.tmp
 dist/
 build/
 *.spec
+process_names_excel.py
+test_*.py
