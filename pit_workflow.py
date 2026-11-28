@@ -26,6 +26,17 @@ from ledger_payroll_scanner import FlaggedCostEntry, LedgerAuditSummary, scan_ac
 from npt_tms_engine import TmsNptRow, audit_dependents, parse_tms_npt_file, parse_ym
 from pit_tax_rules import excel_formula_progressive_pit_annual, get_policy_for_year
 from tax_parser import TaxDeclaration
+from tms_extra_engine import (
+    MultiIncomeRecord,
+    NptDirectoryRecord,
+    NptIncomeRecord,
+    check_npt_hkd_in_period,
+    check_npt_income_threshold,
+    evaluate_multi_income_for_person,
+    parse_multi_income_files,
+    parse_npt_directory_files,
+    parse_npt_income_files,
+)
 from xml_05qtt_parser import Row053, clean_mst
 
 
@@ -739,6 +750,271 @@ def add_quick_test_formulas_051_052(
     return counts
 
 
+def apply_extra_tms_checks(
+    wb: openpyxl.Workbook,
+    tax_year: Optional[int] = None,
+    company_mst: str = "",
+    multi_income_records: Optional[Sequence[MultiIncomeRecord]] = None,
+    npt_dir_records: Optional[Sequence[NptDirectoryRecord]] = None,
+    npt_income_records: Optional[Sequence[NptIncomeRecord]] = None,
+) -> Dict[str, int]:
+    """
+    Đối chiếu 3 nguồn dữ liệu nâng cao từ TMS trực tiếp lên các sheet:
+    - 05-1 (cột AE..AF): Cảnh báo cá nhân KHÔNG đủ điều kiện Ủy quyền QT (có thu nhập nhiều nơi).
+    - 05-2 (cột R..S): Cảnh báo cá nhân thuộc diện PHẢI khấu trừ 10% (không đủ ĐK Cam kết 08).
+    - 05-3 (cột W..X): Cảnh báo NPT là Hộ kinh doanh đang hoạt động & NPT có thu nhập vượt ngưỡng.
+    """
+    yr = tax_year or 2024
+    policy = get_policy_for_year(yr)
+    self_yr = policy.self_deduction_annual
+
+    f_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
+    f_code = Font(name="Calibri", size=9, italic=True, color="1F4E78")
+    f_reg = Font(name="Calibri", size=9)
+    f_bold = Font(name="Calibri", size=9, bold=True)
+    fill_hdr = PatternFill(start_color="833C0C", end_color="833C0C", fill_type="solid")
+    fill_code = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    fill_ok = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    fill_err = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    fill_warn = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    thin = Side(style="thin", color="000000")
+    b_thin = Border(left=thin, right=thin, top=thin, bottom=thin)
+    al_c = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    al_l = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    al_r = Alignment(horizontal="right", vertical="center")
+    NUM = "#,##0"
+
+    summary = {"uq_warnings_051": 0, "kt10_warnings_052": 0, "hkd_warnings_053": 0, "npt_inc_warnings_053": 0}
+
+    # 1. ĐỐI CHIẾU THU NHẬP NHIỀU NƠI LÊN 05-1 (AE..AF) & 05-2 (R..S)
+    if multi_income_records:
+        if "05-1" in wb.sheetnames:
+            ws1 = wb["05-1"]
+            if "AE1:AF1" not in [str(m) for m in ws1.merged_cells.ranges]:
+                ws1.merge_cells("AE1:AF1")
+            ws1["AE1"] = "ĐỐI CHIẾU THU NHẬP NHIỀU NƠI (TMS)"
+            for cc in (31, 32):
+                c1 = ws1.cell(1, cc)
+                c1.font = f_hdr
+                c1.fill = fill_hdr
+                c1.alignment = al_c
+                c1.border = b_thin
+            for cc, title, code, w in (
+                (31, "TNCT nơi khác\n(TMS)", "[T8]", 18),
+                (32, "Cảnh báo Ủy quyền QT\n(Thu nhập nhiều nơi)", "[T9]", 42),
+            ):
+                c2 = ws1.cell(2, cc, title)
+                c2.font = f_hdr
+                c2.fill = fill_hdr
+                c2.alignment = al_c
+                c2.border = b_thin
+                c3 = ws1.cell(3, cc, code)
+                c3.font = f_code
+                c3.fill = fill_code
+                c3.alignment = al_c
+                c3.border = b_thin
+                ws1.column_dimensions[get_column_letter(cc)].width = w
+
+            for r in range(4, ws1.max_row + 1):
+                a_txt = _clean_text(ws1.cell(r, 1).value).upper()
+                b_txt = _clean_text(ws1.cell(r, 2).value)
+                if "TỔNG CỘNG" in a_txt or "TỔNG CỘNG" in b_txt.upper() or (not b_txt and not _clean_text(ws1.cell(r, 3).value)):
+                    continue
+                mst = clean_mst(ws1.cell(r, 3).value)
+                cccd = _clean_id(ws1.cell(r, 5).value)
+                f_val = _clean_text(ws1.cell(r, 6).value).upper()
+                is_uq = f_val in ("[X]", "X", "TRUE", "1")
+                others = evaluate_multi_income_for_person(mst, cccd, company_mst, yr, multi_income_records)
+                other_tn = sum(x.tnct for x in others)
+                other_cnt = len(others)
+                has_other_051 = any(x.loai_bk == "05-1" for x in others)
+                has_unwithheld_052 = any(x.loai_bk != "05-1" and x.tnct >= 2_000_000 and x.thue_kt + 1000 < round(x.tnct * 0.1) for x in others)
+
+                c_tn = ws1.cell(r, 31, round(other_tn))
+                c_tn.number_format = NUM
+                c_tn.alignment = al_r
+                c_tn.font = f_reg
+                c_tn.border = b_thin
+
+                is_err = False
+                if is_uq and other_cnt > 0:
+                    if has_other_051:
+                        msg = f"KHÔNG ĐỦ ĐK UQ: Có TN 05-1 tại nơi khác ({other_cnt} nơi, {other_tn:,.0f} đ)"
+                        is_err = True
+                    elif other_tn > 120_000_000:
+                        msg = f"KHÔNG ĐỦ ĐK UQ: TN vãng lai nơi khác {other_tn:,.0f} đ > 120tr/năm"
+                        is_err = True
+                    elif has_unwithheld_052:
+                        msg = f"KHÔNG ĐỦ ĐK UQ: TN nơi khác ({other_tn:,.0f} đ) chưa khấu trừ đủ 10%"
+                        is_err = True
+                    else:
+                        msg = f"Đủ ĐK UQ (Vãng lai nơi khác {other_tn:,.0f} đ ≤ 120tr đã KT 10%)"
+                elif other_cnt > 0:
+                    msg = f"Có TN tại {other_cnt} nơi khác ({other_tn:,.0f} đ - Không UQ)"
+                else:
+                    msg = "1 nguồn thu nhập"
+
+                c_msg = ws1.cell(r, 32, msg)
+                c_msg.alignment = al_l
+                c_msg.font = f_bold if is_err else f_reg
+                c_msg.border = b_thin
+                if is_err:
+                    summary["uq_warnings_051"] += 1
+                    c_tn.fill = fill_err
+                    c_msg.fill = fill_err
+                elif other_cnt > 0:
+                    c_msg.fill = fill_warn
+                else:
+                    c_msg.fill = fill_ok
+
+        if "05-2" in wb.sheetnames:
+            ws2 = wb["05-2"]
+            if "R1:S1" not in [str(m) for m in ws2.merged_cells.ranges]:
+                ws2.merge_cells("R1:S1")
+            ws2["R1"] = "ĐỐI CHIẾU THU NHẬP NHIỀU NƠI (TMS)"
+            for cc in (18, 19):
+                c1 = ws2.cell(1, cc)
+                c1.font = f_hdr
+                c1.fill = fill_hdr
+                c1.alignment = al_c
+                c1.border = b_thin
+            for cc, title, code, w in (
+                (18, "TNCT nơi khác\n(TMS)", "[T6]", 18),
+                (19, "Cảnh báo Khấu trừ 10%\n(Thu nhập nhiều nơi)", "[T7]", 44),
+            ):
+                c2 = ws2.cell(2, cc, title)
+                c2.font = f_hdr
+                c2.fill = fill_hdr
+                c2.alignment = al_c
+                c2.border = b_thin
+                c3 = ws2.cell(3, cc, code)
+                c3.font = f_code
+                c3.fill = fill_code
+                c3.alignment = al_c
+                c3.border = b_thin
+                ws2.column_dimensions[get_column_letter(cc)].width = w
+
+            for r in range(4, ws2.max_row + 1):
+                a_txt = _clean_text(ws2.cell(r, 1).value).upper()
+                b_txt = _clean_text(ws2.cell(r, 2).value)
+                if any(k in a_txt for k in ("TỔNG CỘNG", "CÁ NHÂN CƯ TRÚ", "CÁ NHÂN KHÔNG CƯ TRÚ")) or "TỔNG CỘNG" in b_txt.upper():
+                    continue
+                if not b_txt and not _clean_text(ws2.cell(r, 3).value):
+                    continue
+                mst = clean_mst(ws2.cell(r, 3).value)
+                cccd = _clean_id(ws2.cell(r, 5).value)
+                is_nonres = _clean_text(ws2.cell(r, 6).value).upper() in ("[X]", "X", "TRUE", "1")
+                here_tn = float(ws2.cell(r, 7).value or 0)
+                here_kt = float(ws2.cell(r, 11).value or 0)
+                others = evaluate_multi_income_for_person(mst, cccd, company_mst, yr, multi_income_records)
+                other_tn = sum(x.tnct for x in others)
+                other_cnt = len(others)
+                tot_all_tn = here_tn + other_tn
+
+                c_tn = ws2.cell(r, 18, round(other_tn))
+                c_tn.number_format = NUM
+                c_tn.alignment = al_r
+                c_tn.font = f_reg
+                c_tn.border = b_thin
+
+                is_err = False
+                if not is_nonres and here_tn >= 2_000_000 and here_kt + 1000 < round(here_tn * 0.1):
+                    if other_cnt > 0 or tot_all_tn > self_yr:
+                        msg = f"PHẢI KHẤU TRỪ 10% (Bác CK 08): Có TN tại {other_cnt} nơi khác, tổng TN {tot_all_tn:,.0f} đ"
+                        is_err = True
+                    else:
+                        msg = "Chưa thấy TN nơi khác trên TMS (KT hồ sơ Cam kết 08)"
+                elif other_cnt > 0:
+                    msg = f"Đã KT đủ (Có TN tại {other_cnt} nơi khác: {other_tn:,.0f} đ)"
+                else:
+                    msg = "Hợp lệ"
+
+                c_msg = ws2.cell(r, 19, msg)
+                c_msg.alignment = al_l
+                c_msg.font = f_bold if is_err else f_reg
+                c_msg.border = b_thin
+                if is_err:
+                    summary["kt10_warnings_052"] += 1
+                    c_tn.fill = fill_err
+                    c_msg.fill = fill_err
+                elif other_cnt > 0:
+                    c_msg.fill = fill_warn
+                else:
+                    c_msg.fill = fill_ok
+
+    # 2. ĐỐI CHIẾU DANH BẠ NPT (HKD) & DS NPT CÓ THU NHẬP LÊN 05-3 (W..X = cột 23..24)
+    if (npt_dir_records or npt_income_records) and "05-3" in wb.sheetnames:
+        ws3 = wb["05-3"]
+        if "W1:X1" not in [str(m) for m in ws3.merged_cells.ranges]:
+            ws3.merge_cells("W1:X1")
+        ws3["W1"] = "KIỂM TRA DANH BẠ HKD & THU NHẬP NPT (TMS)"
+        for cc in (23, 24):
+            c1 = ws3.cell(1, cc)
+            c1.font = f_hdr
+            c1.fill = fill_hdr
+            c1.alignment = al_c
+            c1.border = b_thin
+        for cc, title, code, w in (
+            (23, "Kiểm tra Danh bạ NPT\n(Hộ kinh doanh)", "[DC12]", 36),
+            (24, "Kiểm tra NPT có thu nhập\n(Vượt ngưỡng giảm trừ)", "[DC13]", 40),
+        ):
+            c2 = ws3.cell(2, cc, title)
+            c2.font = f_hdr
+            c2.fill = fill_hdr
+            c2.alignment = al_c
+            c2.border = b_thin
+            c3 = ws3.cell(3, cc, code)
+            c3.font = f_code
+            c3.fill = fill_code
+            c3.alignment = al_c
+            c3.border = b_thin
+            ws3.column_dimensions[get_column_letter(cc)].width = w
+
+        for r in range(4, ws3.max_row + 1):
+            ten_nnt = _clean_text(ws3.cell(r, 2).value)
+            ten_npt = _clean_text(ws3.cell(r, 4).value)
+            mst_npt = clean_mst(ws3.cell(r, 6).value)
+            so_gt = _clean_id(ws3.cell(r, 8).value)
+            if not mst_npt and not ten_npt:
+                continue
+            if "TỔNG CỘNG" in (_clean_text(ws3.cell(r, 1).value) + " " + ten_nnt).upper():
+                continue
+            d_from = parse_ym(_clean_text(ws3.cell(r, 10).value))
+            d_to = parse_ym(_clean_text(ws3.cell(r, 11).value))
+
+            # Cột W (23): Danh bạ NPT / HKD
+            if npt_dir_records:
+                is_hkd_err, hkd_msg = check_npt_hkd_in_period(mst_npt, so_gt, d_from, d_to, npt_dir_records)
+            else:
+                is_hkd_err, hkd_msg = False, "(Chưa nạp Danh bạ NPT)"
+            c_hkd = ws3.cell(r, 23, hkd_msg)
+            c_hkd.alignment = al_l
+            c_hkd.font = f_bold if is_hkd_err else f_reg
+            c_hkd.border = b_thin
+            if is_hkd_err:
+                summary["hkd_warnings_053"] += 1
+                c_hkd.fill = fill_err
+            elif npt_dir_records:
+                c_hkd.fill = fill_ok
+
+            # Cột X (24): DS NPT có thu nhập
+            if npt_income_records:
+                is_inc_err, _, inc_msg = check_npt_income_threshold(mst_npt, so_gt, yr, npt_income_records)
+            else:
+                is_inc_err, inc_msg = False, "(Chưa nạp DS NPT có TN)"
+            c_inc = ws3.cell(r, 24, inc_msg)
+            c_inc.alignment = al_l
+            c_inc.font = f_bold if is_inc_err else f_reg
+            c_inc.border = b_thin
+            if is_inc_err:
+                summary["npt_inc_warnings_053"] += 1
+                c_inc.fill = fill_err
+            elif npt_income_records:
+                c_inc.fill = fill_ok
+
+    return summary
+
+
 def export_yearly_tncn_with_audit(
     declarations: List[TaxDeclaration],
     out_dir: str,
@@ -747,6 +1023,9 @@ def export_yearly_tncn_with_audit(
     tms_npt_path: Optional[str] = None,
     tms_npt_paths: Optional[Sequence[str]] = None,
     ledger_paths: Optional[Sequence[str]] = None,
+    multi_income_paths: Optional[Sequence[str]] = None,
+    npt_dir_paths: Optional[Sequence[str]] = None,
+    npt_income_paths: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], Dict[int, Dict[str, Any]]]:
     """
     Lọc tờ khai TNCN theo khoảng [year_from .. year_to], chọn bản bổ sung cuối cùng mỗi năm
@@ -781,6 +1060,10 @@ def export_yearly_tncn_with_audit(
     for tp in all_tms_paths:
         tms_rows.extend(parse_tms_npt_file(tp))
 
+    multi_inc_records = parse_multi_income_files(multi_income_paths) if multi_income_paths else []
+    npt_dir_records = parse_npt_directory_files(npt_dir_paths) if npt_dir_paths else []
+    npt_inc_records = parse_npt_income_files(npt_income_paths) if npt_income_paths else []
+
     # Quét sổ chi tiết & bảng lương tách theo từng năm
     ledgers_by_year = scan_accounting_ledgers_by_year(ledger_paths) if ledger_paths else {}
     undated_ledger = ledgers_by_year.get(None)
@@ -795,11 +1078,24 @@ def export_yearly_tncn_with_audit(
         # 1. Xuất đúng 4 sheet chuẩn mẫu tax_xml_to_excel: TK, 05-1, 05-2, 05-3
         write_single_year_tncn_file(out_path, d)
 
-        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 + gắn công thức test nhanh 05-1/05-2 + quỹ lương & rủi ro chi phí
+        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 + gắn công thức test nhanh 05-1/05-2 + 3 nguồn TMS mở rộng + quỹ lương
         wb = openpyxl.load_workbook(out_path)
         add_quick_test_formulas_051_052(wb, tax_year=d.year)
         if "05-3" in wb.sheetnames:
             stats_by_year[yr] = reconcile_053_inplace(wb, tms_rows, tax_year=d.year)
+        else:
+            stats_by_year[yr] = {"total_rows": 0, "matched": 0, "total_diff_months": 0, "total_disallowed_amount": 0}
+
+        if multi_inc_records or npt_dir_records or npt_inc_records:
+            extra_st = apply_extra_tms_checks(
+                wb,
+                tax_year=d.year,
+                company_mst=d.mst or "",
+                multi_income_records=multi_inc_records,
+                npt_dir_records=npt_dir_records,
+                npt_income_records=npt_inc_records,
+            )
+            stats_by_year[yr].update(extra_st)
 
         yr_ledger = ledgers_by_year.get(yr)
         yr_flagged: List[FlaggedCostEntry] = []
@@ -821,11 +1117,26 @@ def reconcile_existing_tncn_excel(
     excel_path: str,
     tms_npt_path: str,
     tax_year: Optional[int] = None,
+    multi_income_paths: Optional[Sequence[str]] = None,
+    npt_dir_paths: Optional[Sequence[str]] = None,
+    npt_income_paths: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """Đối chiếu trực tiếp NPT trên sheet '05-3' của file Excel QTT_TNCN_YYYY.xlsx đã xuất sẵn."""
-    tms_rows = parse_tms_npt_file(tms_npt_path)
+    """Đối chiếu trực tiếp NPT trên sheet '05-3' + test nhanh 05-1/05-2 + 3 nguồn TMS mở rộng của file Excel QTT_TNCN_YYYY.xlsx đã xuất sẵn."""
+    tms_rows = parse_tms_npt_file(tms_npt_path) if (tms_npt_path and os.path.isfile(tms_npt_path)) else []
     wb = openpyxl.load_workbook(excel_path)
     add_quick_test_formulas_051_052(wb, tax_year=tax_year)
     stats = reconcile_053_inplace(wb, tms_rows, tax_year=tax_year)
+    multi_inc = parse_multi_income_files(multi_income_paths) if multi_income_paths else []
+    npt_dir = parse_npt_directory_files(npt_dir_paths) if npt_dir_paths else []
+    npt_inc = parse_npt_income_files(npt_income_paths) if npt_income_paths else []
+    if multi_inc or npt_dir or npt_inc:
+        extra_st = apply_extra_tms_checks(
+            wb,
+            tax_year=tax_year,
+            multi_income_records=multi_inc,
+            npt_dir_records=npt_dir,
+            npt_income_records=npt_inc,
+        )
+        stats.update(extra_st)
     wb.save(excel_path)
     return stats

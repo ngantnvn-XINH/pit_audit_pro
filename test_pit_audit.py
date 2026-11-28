@@ -632,6 +632,101 @@ class TestPitAuditPro(unittest.TestCase):
         self.assertIn("120000000", str(ws1["Z4"].value))
         self.assertIn("186000000", str(ws1["AC4"].value))
 
+    def test_v14_extra_tms_folder_checks_multi_income_hkd_and_npt_income(self) -> None:
+        """Kiểm thử v1.4: Nạp thư mục Thu nhập nhiều nơi, Danh bạ NPT (HKD), DS NPT có thu nhập -> cảnh báo trực tiếp trên 05-1, 05-2, 05-3."""
+        from pit_workflow import apply_extra_tms_checks
+        from tms_extra_engine import (
+            parse_multi_income_files,
+            parse_npt_directory_files,
+            parse_npt_income_files,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d_mi = os.path.join(tmpdir, "tn_nhieu_noi")
+            d_dir = os.path.join(tmpdir, "danh_ba_npt")
+            d_inc = os.path.join(tmpdir, "npt_co_tn")
+            os.makedirs(d_mi)
+            os.makedirs(d_dir)
+            os.makedirs(d_inc)
+
+            # 1. File Thu nhập nhiều nơi (Excel)
+            wb_mi = openpyxl.Workbook()
+            ws_mi = wb_mi.active
+            ws_mi.append(["STT", "MST cá nhân", "Họ và tên", "MST tổ chức chi trả", "Tên tổ chức", "Bảng kê", "Năm", "Tổng TNCT", "Thuế đã khấu trừ"])
+            ws_mi.append([1, "8000000001", "Nguyễn Văn A", "0109999999", "CTY Khác 1", "05-1", 2024, 150_000_000, 5_000_000])
+            ws_mi.append([2, "8000000002", "Trần CTV B", "0108888888", "CTY Khác 2", "05-2", 2024, 30_000_000, 3_000_000])
+            wb_mi.save(os.path.join(d_mi, "TN_NhieuNoi_2024.xlsx"))
+
+            # 2. File Danh bạ NPT (HKD đang hoạt động)
+            wb_dir = openpyxl.Workbook()
+            ws_dir = wb_dir.active
+            ws_dir.append(["STT", "MST NPT", "Họ tên NPT", "Loại NNT", "Trạng thái", "Ngày cấp"])
+            ws_dir.append([1, "8900000011", "Lê Văn HKD", "Hộ kinh doanh", "Đang hoạt động", "01/01/2020"])
+            wb_dir.save(os.path.join(d_dir, "DanhBa_NPT.xlsx"))
+
+            # 3. File DS NPT có thu nhập (> 12tr/năm 2024)
+            wb_inc = openpyxl.Workbook()
+            ws_inc = wb_inc.active
+            ws_inc.append(["STT", "MST NPT", "Họ tên NPT", "Năm", "Tổng thu nhập"])
+            ws_inc.append([1, "8900000012", "Phạm Thị Thu Nhập", 2024, 48_000_000])
+            wb_inc.save(os.path.join(d_inc, "DS_NPT_CoTN_2024.xlsx"))
+
+            mi_recs = parse_multi_income_files([d_mi])
+            dir_recs = parse_npt_directory_files([d_dir])
+            inc_recs = parse_npt_income_files([d_inc])
+            self.assertEqual(len(mi_recs), 2)
+            self.assertEqual(len(dir_recs), 1)
+            self.assertEqual(len(inc_recs), 1)
+
+            # Workbook QTT mẫu có 05-1, 05-2, 05-3
+            wb = openpyxl.Workbook()
+            ws1 = wb.active
+            ws1.title = "05-1"
+            ws1.cell(4, 1, 1)
+            ws1.cell(4, 2, "Nguyễn Văn A")
+            ws1.cell(4, 3, "8000000001")
+            ws1.cell(4, 6, "[x]")  # Có ủy quyền QT -> phải bị cảnh báo!
+
+            ws2 = wb.create_sheet("05-2")
+            ws2.cell(4, 1, 1)
+            ws2.cell(4, 2, "Trần CTV B")
+            ws2.cell(4, 3, "8000000002")
+            ws2.cell(4, 6, "[]")
+            ws2.cell(4, 7, 10_000_000)
+            ws2.cell(4, 11, 0)  # Chưa khấu trừ 10% nhưng có TN nơi khác -> phải bị cảnh báo!
+
+            ws3 = wb.create_sheet("05-3")
+            ws3.cell(4, 1, 1)
+            ws3.cell(4, 2, "NNT 1")
+            ws3.cell(4, 4, "Lê Văn HKD")
+            ws3.cell(4, 6, "8900000011")
+            ws3.cell(4, 10, "01/2024")
+            ws3.cell(4, 11, "12/2024")
+
+            ws3.cell(5, 1, 2)
+            ws3.cell(5, 2, "NNT 2")
+            ws3.cell(5, 4, "Phạm Thị Thu Nhập")
+            ws3.cell(5, 6, "8900000012")
+            ws3.cell(5, 10, "01/2024")
+            ws3.cell(5, 11, "12/2024")
+
+            st = apply_extra_tms_checks(
+                wb,
+                tax_year=2024,
+                company_mst="0100000001",
+                multi_income_records=mi_recs,
+                npt_dir_records=dir_recs,
+                npt_income_records=inc_recs,
+            )
+            self.assertEqual(st["uq_warnings_051"], 1)
+            self.assertEqual(st["kt10_warnings_052"], 1)
+            self.assertEqual(st["hkd_warnings_053"], 1)
+            self.assertEqual(st["npt_inc_warnings_053"], 1)
+            self.assertIn("KHÔNG ĐỦ ĐK UQ", str(ws1["AF4"].value))
+            self.assertIn("PHẢI KHẤU TRỪ 10%", str(ws2["S4"].value))
+            self.assertIn("HỘ KINH DOANH", str(ws3["W4"].value))
+            self.assertIn("KHÔNG ĐỦ ĐK GIẢM TRỪ", str(ws3["X5"].value))
+
 
 if __name__ == "__main__":
     unittest.main()

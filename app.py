@@ -22,19 +22,22 @@ from pit_workflow import export_yearly_tncn_with_audit, reconcile_existing_tncn_
 from tax_parser import TaxDeclaration, parse_tax_xml
 
 
-APP_VERSION = "v1.3"
+APP_VERSION = "v1.4"
 
 
 class PitAuditProApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"PIT Audit Pro — Đối chiếu & Tính Thuế TNCN Chuyên sâu ({APP_VERSION})")
-        self.root.geometry("1140x760")
-        self.root.minsize(980, 640)
+        self.root.geometry("1180x850")
+        self.root.minsize(1020, 720)
 
         self.declarations: List[TaxDeclaration] = []
         self.file_paths_set: set[str] = set()
         self.tms_files: List[str] = []
+        self.multi_income_files: List[str] = []
+        self.npt_dir_files: List[str] = []
+        self.npt_income_files: List[str] = []
         self.ledger_files: List[str] = []
 
         self._setup_style()
@@ -101,15 +104,51 @@ class PitAuditProApp:
             foreground="#555555",
         ).pack(side=tk.LEFT)
 
-        # 2. Chọn 1 hoặc nhiều file Người phụ thuộc hệ thống TMS để đối chiếu trực tiếp trên 05-3
-        f_tms = ttk.LabelFrame(self.root, text="3. File Người phụ thuộc kết xuất từ TMS (.xlsx / .csv) — Hỗ trợ chọn nhiều file, đối chiếu trực tiếp trên 05-3", padding=8)
-        f_tms.pack(fill=tk.X, padx=12, pady=4)
+        # 2. Chọn 1 hoặc nhiều file / cả thư mục Người phụ thuộc hệ thống TMS để đối chiếu trực tiếp trên 05-3
+        f_tms = ttk.LabelFrame(self.root, text="3. File / Thư mục Người phụ thuộc kết xuất từ TMS (.xls/.xlsx/.csv) — Đối chiếu trực tiếp trên 05-3", padding=6)
+        f_tms.pack(fill=tk.X, padx=12, pady=3)
 
         self.var_tms_path = tk.StringVar(value="")
-        ttk.Label(f_tms, text="File NPT TMS:").pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Entry(f_tms, textvariable=self.var_tms_path, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(f_tms, text="Thêm file NPT (.xls/.xlsx/.csv)...", command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(f_tms, text="Xóa tất cả", command=self.clear_tms_files).pack(side=tk.LEFT)
+        ttk.Label(f_tms, text="File/TM NPT TMS:", width=22).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(f_tms, textvariable=self.var_tms_path, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ttk.Button(f_tms, text="Chọn file...", width=11, command=self.pick_tms_file).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(f_tms, text="Chọn thư mục...", width=14, command=self.pick_tms_folder).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(f_tms, text="Xóa", width=6, command=self.clear_tms_files).pack(side=tk.LEFT)
+
+        # 3b. Dữ liệu đối chiếu nâng cao từ TMS (Thu nhập nhiều nơi, Danh bạ NPT/HKD, DS NPT có thu nhập)
+        f_extra = ttk.LabelFrame(
+            self.root,
+            text="3b. Dữ liệu đối chiếu nâng cao từ TMS (Chọn file hoặc cả thư mục — Tùy chọn: cảnh báo trực tiếp trên 05-1, 05-2, 05-3)",
+            padding=6,
+        )
+        f_extra.pack(fill=tk.X, padx=12, pady=3)
+
+        self.var_multi_inc = tk.StringVar(value="")
+        self.var_npt_dir = tk.StringVar(value="")
+        self.var_npt_inc = tk.StringVar(value="")
+
+        extra_specs = [
+            ("Thu nhập nhiều nơi (05-1/05-2):", self.var_multi_inc, self.multi_income_files, "Thu nhập nhiều nơi (05-1 Ủy quyền QT / 05-2 Khấu trừ 10%)"),
+            ("Danh bạ NPT / HKD (05-3):", self.var_npt_dir, self.npt_dir_files, "Danh bạ Người phụ thuộc (cảnh báo NPT là Hộ kinh doanh)"),
+            ("DS NPT có thu nhập (05-3):", self.var_npt_inc, self.npt_income_files, "Danh sách Người phụ thuộc có thu nhập (cảnh báo vượt ngưỡng)"),
+        ]
+        for idx_e, (lbl_e, var_e, lst_e, title_e) in enumerate(extra_specs):
+            r_f = ttk.Frame(f_extra)
+            r_f.pack(fill=tk.X, pady=(0, 3 if idx_e < 2 else 0))
+            ttk.Label(r_f, text=lbl_e, width=28).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Entry(r_f, textvariable=var_e, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            ttk.Button(
+                r_f, text="Chọn file...", width=11,
+                command=lambda v=var_e, l=lst_e, t=title_e: self._pick_extra_files(v, l, t),
+            ).pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Button(
+                r_f, text="Chọn thư mục...", width=14,
+                command=lambda v=var_e, l=lst_e, t=title_e: self._pick_extra_folder(v, l, t),
+            ).pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Button(
+                r_f, text="Xóa", width=6,
+                command=lambda v=var_e, l=lst_e: self._clear_extra_list(v, l),
+            ).pack(side=tk.LEFT)
 
         # 3. Chọn nhiều file / cả thư mục Sổ chi tiết tài khoản & Bảng tính lương/thuế nhiều năm
         f_led = ttk.LabelFrame(
@@ -283,9 +322,55 @@ class PitAuditProApp:
         if self.tms_files:
             self.var_tms_path.set("; ".join(os.path.basename(x) for x in self.tms_files) + f" ({len(self.tms_files)} file)")
 
+    def pick_tms_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Chọn thư mục chứa các file Người phụ thuộc kết xuất từ TMS (quét cả thư mục con)")
+        if not folder:
+            return
+        for root_dir, _, files in os.walk(folder):
+            for fn in files:
+                if fn.lower().endswith((".xlsx", ".xls", ".csv")) and not fn.startswith("~$"):
+                    norm = os.path.normpath(os.path.join(root_dir, fn))
+                    if norm not in self.tms_files:
+                        self.tms_files.append(norm)
+        if self.tms_files:
+            self.var_tms_path.set(f"{os.path.basename(folder)} — {len(self.tms_files)} file")
+
     def clear_tms_files(self) -> None:
         self.tms_files.clear()
         self.var_tms_path.set("")
+
+    def _pick_extra_files(self, var: tk.StringVar, target_list: List[str], title: str) -> None:
+        paths = filedialog.askopenfilenames(
+            title=f"Chọn 1 hoặc nhiều file: {title}",
+            filetypes=[("Excel / CSV", "*.xlsx *.xls *.csv"), ("Excel Workbook", "*.xlsx"), ("Excel 97-2003", "*.xls"), ("CSV", "*.csv"), ("All files", "*.*")],
+        )
+        for p in paths:
+            norm = os.path.normpath(p)
+            if norm not in target_list:
+                target_list.append(norm)
+        if target_list:
+            var.set("; ".join(os.path.basename(x) for x in target_list[:3]) + (f" ... ({len(target_list)} file)" if len(target_list) > 3 else f" ({len(target_list)} file)"))
+
+    def _pick_extra_folder(self, var: tk.StringVar, target_list: List[str], title: str) -> None:
+        folder = filedialog.askdirectory(title=f"Chọn thư mục chứa dữ liệu: {title} (quét cả thư mục con)")
+        if not folder:
+            return
+        added = 0
+        for root_dir, _, files in os.walk(folder):
+            for fn in files:
+                if fn.lower().endswith((".xlsx", ".xls", ".csv")) and not fn.startswith("~$"):
+                    norm = os.path.normpath(os.path.join(root_dir, fn))
+                    if norm not in target_list:
+                        target_list.append(norm)
+                        added += 1
+        if target_list:
+            var.set(f"{os.path.basename(folder)} — {len(target_list)} file")
+        if added:
+            self.lbl_status.config(text=f"Đã nạp {added} file cho mục {title}.")
+
+    def _clear_extra_list(self, var: tk.StringVar, target_list: List[str]) -> None:
+        target_list.clear()
+        var.set("")
 
     def _add_ledger_paths(self, paths: List[str]) -> None:
         added = 0
@@ -362,12 +447,15 @@ class PitAuditProApp:
 
         y_from, y_to = self._get_year_bounds()
         valid_tms_list = [p for p in self.tms_files if os.path.isfile(p)]
+        multi_inc_list = list(self.multi_income_files)
+        npt_dir_list = list(self.npt_dir_files)
+        npt_inc_list = list(self.npt_income_files)
         ledgers = list(self.ledger_files)
         open_after = self.var_open_after.get()
 
         self.btn_export.config(state=tk.DISABLED)
         self.btn_reconcile_excel.config(state=tk.DISABLED)
-        self.lbl_status.config(text="Đang xuất file QTT TNCN từng năm & đối chiếu trực tiếp trên 05-3...")
+        self.lbl_status.config(text="Đang xuất file QTT TNCN từng năm & đối chiếu toàn diện 05-1, 05-2, 05-3...")
         self.root.update_idletasks()
 
         def worker() -> None:
@@ -379,6 +467,9 @@ class PitAuditProApp:
                     year_to=y_to,
                     tms_npt_paths=valid_tms_list,
                     ledger_paths=ledgers,
+                    multi_income_paths=multi_inc_list,
+                    npt_dir_paths=npt_dir_list,
+                    npt_income_paths=npt_inc_list,
                 )
 
                 def on_done() -> None:
@@ -387,12 +478,22 @@ class PitAuditProApp:
                     self.lbl_status.config(text="Xuất file & đối chiếu thành công!")
                     lines = ["Đã xuất thành công các file QTT TNCN chuẩn mẫu (TK, 05-1, 05-2, 05-3):"] + created
                     if stats_by_year:
-                        lines.append("\nKẾT QUẢ ĐỐI CHIẾU NGƯỜI PHỤ THUỘC TRỰC TIẾP TRÊN 05-3:")
+                        lines.append("\nKẾT QUẢ ĐỐI CHIẾU & CẢNH BÁO RỦI RO:")
                         for yr, st in sorted(stats_by_year.items()):
+                            extra_notes = []
+                            if st.get("uq_warnings_051"):
+                                extra_notes.append(f"05-1 Không đủ ĐK UQ: {st['uq_warnings_051']}")
+                            if st.get("kt10_warnings_052"):
+                                extra_notes.append(f"05-2 Phải KT 10%: {st['kt10_warnings_052']}")
+                            if st.get("hkd_warnings_053"):
+                                extra_notes.append(f"05-3 NPT là HKD: {st['hkd_warnings_053']}")
+                            if st.get("npt_inc_warnings_053"):
+                                extra_notes.append(f"05-3 NPT có TN vượt ngưỡng: {st['npt_inc_warnings_053']}")
+                            extra_str = (" | " + " | ".join(extra_notes)) if extra_notes else ""
                             lines.append(
-                                f"• Năm {yr}: Tổng {st['total_rows']} dòng | Khớp: {st['matched']} | "
-                                f"Cảnh báo độ tuổi: {st.get('age_warnings', 0)} | Trùng NPT: {st.get('duplicates', 0)} | "
-                                f"Loại trừ TMS: {st['total_diff_months']} tháng ({st['total_disallowed_amount']:,.0f} đ)"
+                                f"• Năm {yr}: Tổng {st['total_rows']} dòng NPT | Khớp: {st['matched']} | "
+                                f"Độ tuổi: {st.get('age_warnings', 0)} | Trùng: {st.get('duplicates', 0)} | "
+                                f"Loại trừ TMS: {st['total_diff_months']} tháng ({st['total_disallowed_amount']:,.0f} đ){extra_str}"
                             )
                     messagebox.showinfo("Hoàn tất", "\n".join(lines))
                     if open_after:
@@ -436,15 +537,24 @@ class PitAuditProApp:
                 self.tms_files.append(norm_t)
             self.var_tms_path.set("; ".join(os.path.basename(x) for x in self.tms_files) + f" ({len(self.tms_files)} file)")
 
+        multi_inc_list = list(self.multi_income_files)
+        npt_dir_list = list(self.npt_dir_files)
+        npt_inc_list = list(self.npt_income_files)
         open_after = self.var_open_after.get()
         self.btn_export.config(state=tk.DISABLED)
         self.btn_reconcile_excel.config(state=tk.DISABLED)
-        self.lbl_status.config(text="Đang đối chiếu NPT trực tiếp trên sheet 05-3...")
+        self.lbl_status.config(text="Đang đối chiếu trực tiếp 05-1, 05-2, 05-3...")
         self.root.update_idletasks()
 
         def worker() -> None:
             try:
-                st = reconcile_existing_tncn_excel(excel_path, tms_path)
+                st = reconcile_existing_tncn_excel(
+                    excel_path,
+                    tms_path,
+                    multi_income_paths=multi_inc_list,
+                    npt_dir_paths=npt_dir_list,
+                    npt_income_paths=npt_inc_list,
+                )
 
                 def on_done() -> None:
                     self.btn_export.config(state=tk.NORMAL)
