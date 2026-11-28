@@ -24,7 +24,7 @@ from openpyxl.utils import get_column_letter
 from excel_exporter import filter_latest_per_year, write_single_year_tncn_file
 from ledger_payroll_scanner import FlaggedCostEntry, LedgerAuditSummary, scan_accounting_ledgers_by_year
 from npt_tms_engine import TmsNptRow, audit_dependents, parse_tms_npt_file, parse_ym
-from pit_tax_rules import get_policy_for_year
+from pit_tax_rules import excel_formula_progressive_pit_annual, get_policy_for_year
 from tax_parser import TaxDeclaration
 from xml_05qtt_parser import Row053, clean_mst
 
@@ -527,6 +527,218 @@ def _append_payroll_reconcile_sheet(wb: openpyxl.Workbook, yr: int, ls: LedgerAu
         ws.column_dimensions[get_column_letter(ci)].width = w
 
 
+def add_quick_test_formulas_051_052(
+    wb: openpyxl.Workbook,
+    tax_year: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    Gắn trực tiếp khối công thức TEST NHANH cảnh báo rủi ro khấu trừ / tính sai thuế TNCN
+    ở bên phải các cột gốc của sheet '05-1' (cột X..AD) và '05-2' (cột M..Q).
+    - Giữ nguyên bản 100% toàn bộ các cột gốc của bảng kê (A..W trên 05-1; A..L trên 05-2).
+    - Tự động áp dụng đúng mức giảm trừ gia cảnh & biểu lũy tiến theo năm (7 bậc <=2025; 5 bậc >=2026).
+    """
+    yr = tax_year or 2024
+    policy = get_policy_for_year(yr)
+    self_yr = policy.self_deduction_annual
+    dep_mo = policy.dependent_deduction_monthly
+    bracket_lbl = "5 bậc" if yr >= 2026 else "7 bậc"
+
+    f_hdr = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
+    f_code = Font(name="Calibri", size=9, italic=True, color="1F4E78")
+    f_reg = Font(name="Calibri", size=9)
+    f_bold = Font(name="Calibri", size=9, bold=True)
+    fill_hdr = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    fill_code = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    fill_tot = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    thin = Side(style="thin", color="000000")
+    b_thin = Border(left=thin, right=thin, top=thin, bottom=thin)
+    al_c = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    al_l = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    al_r = Alignment(horizontal="right", vertical="center")
+    NUM = "#,##0"
+
+    counts = {"rows_051": 0, "rows_052": 0}
+
+    # ===== 1. SHEET '05-1' (Cột gốc A..W; thêm Test nhanh X..AD = cột 24..30) =====
+    if "05-1" in wb.sheetnames:
+        ws1 = wb["05-1"]
+        if "X1:AD1" not in [str(m) for m in ws1.merged_cells.ranges]:
+            ws1.merge_cells("X1:AD1")
+        ws1["X1"] = f"TEST NHANH RỦI RO TÍNH THUẾ & KHẤU TRỪ (05-1 — NĂM {yr}: {bracket_lbl}, GTBT {self_yr:,.0f})"
+        for cc in range(24, 31):
+            c1 = ws1.cell(1, cc)
+            c1.font = f_hdr
+            c1.fill = fill_hdr
+            c1.alignment = al_c
+            c1.border = b_thin
+
+        defs_051 = [
+            (24, "TN tính thuế\n(Test nhanh)", "[T1]", 16),
+            (25, "Chênh lệch TNTT\n(Test - Khai)", "[T2]", 15),
+            (26, f"Thuế TNCN phải nộp\n(Test {bracket_lbl})", "[T3]", 16),
+            (27, "Chênh lệch Thuế\n(Test - Khai/KT)", "[T4]", 16),
+            (28, "Thuế khấu trừ thiếu\n(=MAX(0, Test-R))", "[T5]", 16),
+            (29, "Kiểm tra GTGC\n(M vs Bản thân+NPT)", "[T6]", 18),
+            (30, "Cảnh báo rủi ro\n(05-1)", "[T7]", 34),
+        ]
+        for cc, title, code, w in defs_051:
+            c2 = ws1.cell(2, cc, title)
+            c2.font = f_hdr
+            c2.fill = fill_hdr
+            c2.alignment = al_c
+            c2.border = b_thin
+            c3 = ws1.cell(3, cc, code)
+            c3.font = f_code
+            c3.fill = fill_code
+            c3.alignment = al_c
+            c3.border = b_thin
+            ws1.column_dimensions[get_column_letter(cc)].width = w
+
+        data_rows_1: List[int] = []
+        tot_row_1: Optional[int] = None
+        for r in range(4, ws1.max_row + 1):
+            a_txt = _clean_text(ws1.cell(r, 1).value).upper()
+            b_txt = _clean_text(ws1.cell(r, 2).value)
+            if "TỔNG CỘNG" in a_txt or "TỔNG CỘNG" in b_txt.upper():
+                tot_row_1 = r
+                continue
+            if not b_txt and not _clean_text(ws1.cell(r, 3).value):
+                continue
+            data_rows_1.append(r)
+            uq_expr = f'OR(UPPER(TRIM(F{r}))="[X]",UPPER(TRIM(F{r}))="X",UPPER(TRIM(F{r}))="TRUE",F{r}=1)'
+            ws1.cell(r, 24, f"=MAX(0,H{r}-J{r}-K{r}-M{r}-N{r}-O{r}-P{r})").number_format = NUM
+            ws1.cell(r, 25, f"=X{r}-Q{r}").number_format = NUM
+            ws1.cell(r, 26, excel_formula_progressive_pit_annual(f"X{r}", year=yr)).number_format = NUM
+            ws1.cell(r, 27, f"=IF({uq_expr},Z{r}-T{r},Z{r}-R{r})").number_format = NUM
+            ws1.cell(r, 28, f"=MAX(0,Z{r}-R{r})").number_format = NUM
+            ws1.cell(
+                r,
+                29,
+                f'=IF(M{r}>({self_yr}+L{r}*12*{dep_mo})+1000,"VƯỢT MỨC GTGC",'
+                f'IF(AND({uq_expr},M{r}<{self_yr}),"THIẾU GT BẢN THÂN","Hợp lệ"))',
+            )
+            ws1.cell(
+                r,
+                30,
+                f'=IF(ABS(Y{r})>1000,"SAI TN TÍNH THUẾ",'
+                f'IF(AND({uq_expr},ABS(Z{r}-T{r})>1000),"TÍNH SAI THUẾ (ỦY QUYỀN QT)",'
+                f'IF(AC{r}<>"Hợp lệ",AC{r},'
+                f'IF(AND(H{r}>{self_yr},R{r}=0,Z{r}>0),"RỦI RO: TN CAO CHƯA KHẤU TRỪ",'
+                f'IF(Z{r}-R{r}>1000,"RỦI RO: KHẤU TRỪ THIẾU (KT KỲ LV)","Hợp lệ")))))',
+            )
+            for cc in range(24, 31):
+                c = ws1.cell(r, cc)
+                c.font = f_bold if cc == 30 else f_reg
+                c.border = b_thin
+                c.alignment = al_r if cc <= 28 else (al_c if cc == 29 else al_l)
+
+        counts["rows_051"] = len(data_rows_1)
+        if tot_row_1 and data_rows_1:
+            r_first, r_last = data_rows_1[0], data_rows_1[-1]
+            for cc in range(24, 29):
+                col_l = get_column_letter(cc)
+                c = ws1.cell(tot_row_1, cc, f"=SUM({col_l}{r_first}:{col_l}{r_last})")
+                c.number_format = NUM
+                c.alignment = al_r
+                c.font = f_bold
+                c.fill = fill_tot
+                c.border = b_thin
+            c_cnt = ws1.cell(tot_row_1, 30, f'=COUNTIF(AD{r_first}:AD{r_last},"<>Hợp lệ")&" dòng cảnh báo"')
+            c_cnt.font = f_bold
+            c_cnt.fill = fill_tot
+            c_cnt.alignment = al_c
+            c_cnt.border = b_thin
+            ws1.cell(tot_row_1, 29).fill = fill_tot
+            ws1.cell(tot_row_1, 29).border = b_thin
+
+    # ===== 2. SHEET '05-2' (Cột gốc A..L; thêm Test nhanh M..Q = cột 13..17) =====
+    if "05-2" in wb.sheetnames:
+        ws2 = wb["05-2"]
+        if "M1:Q1" not in [str(m) for m in ws2.merged_cells.ranges]:
+            ws2.merge_cells("M1:Q1")
+        ws2["M1"] = f"TEST NHANH RỦI RO KHẤU TRỪ 10% / 20% (05-2 — NĂM {yr})"
+        for cc in range(13, 18):
+            c1 = ws2.cell(1, cc)
+            c1.font = f_hdr
+            c1.fill = fill_hdr
+            c1.alignment = al_c
+            c1.border = b_thin
+
+        defs_052 = [
+            (13, "Thuế suất chuẩn\n(10% / 20%)", "[T1]", 14),
+            (14, "Thuế phải KT\n(Test nhanh)", "[T2]", 16),
+            (15, "Thuế KT thiếu\n(=MAX(0,Test-K))", "[T3]", 16),
+            (16, "Tỷ lệ KT thực tế\n(K / G)", "[T4]", 14),
+            (17, "Cảnh báo rủi ro\n(05-2)", "[T5]", 42),
+        ]
+        for cc, title, code, w in defs_052:
+            c2 = ws2.cell(2, cc, title)
+            c2.font = f_hdr
+            c2.fill = fill_hdr
+            c2.alignment = al_c
+            c2.border = b_thin
+            c3 = ws2.cell(3, cc, code)
+            c3.font = f_code
+            c3.fill = fill_code
+            c3.alignment = al_c
+            c3.border = b_thin
+            ws2.column_dimensions[get_column_letter(cc)].width = w
+
+        data_rows_2: List[int] = []
+        tot_row_2: Optional[int] = None
+        for r in range(4, ws2.max_row + 1):
+            a_txt = _clean_text(ws2.cell(r, 1).value).upper()
+            b_txt = _clean_text(ws2.cell(r, 2).value)
+            if "TỔNG CỘNG" in a_txt or "TỔNG CỘNG" in b_txt.upper() or "CÁ NHÂN CƯ TRÚ" in a_txt or "CÁ NHÂN KHÔNG CƯ TRÚ" in a_txt:
+                if "TỔNG CỘNG" in a_txt or "TỔNG CỘNG" in b_txt.upper():
+                    tot_row_2 = r
+                continue
+            if not b_txt and not _clean_text(ws2.cell(r, 3).value):
+                continue
+            data_rows_2.append(r)
+            nr_expr = f'OR(UPPER(TRIM(F{r}))="[X]",UPPER(TRIM(F{r}))="X",UPPER(TRIM(F{r}))="TRUE",F{r}=1)'
+            ws2.cell(r, 13, f"=IF({nr_expr},0.2,0.1)").number_format = "0%"
+            ws2.cell(r, 14, f"=ROUND(MAX(0,G{r}-I{r}-J{r})*M{r},0)").number_format = NUM
+            ws2.cell(r, 15, f"=MAX(0,N{r}-K{r})").number_format = NUM
+            ws2.cell(r, 16, f"=IF(G{r}>0,K{r}/G{r},0)").number_format = "0.0%"
+            ws2.cell(
+                r,
+                17,
+                f'=IF(AND(M{r}=0.2,O{r}>1000),"RỦI RO CAO: KHÔNG CƯ TRÚ KT THIẾU 20%",'
+                f'IF(AND(M{r}=0.1,TRIM(C{r})="",G{r}>=2000000,O{r}>1000),"RỦI RO CAO: CHƯA CÓ MST KHÔNG ĐỦ ĐK CAM KẾT 08 (PHẢI KT 10%)",'
+                f'IF(AND(M{r}=0.1,G{r}>{self_yr},O{r}>1000),"RỦI RO CAO: TN VƯỢT NGƯỠNG GTBT - KHÔNG ĐƯỢC CAM KẾT 08",'
+                f'IF(AND(M{r}=0.1,G{r}>=2000000,O{r}>1000),"CẦN KT CAM KẾT 08/CK-TNCN (KHẤU TRỪ THIẾU 10%)",'
+                f'IF(K{r}-N{r}>1000,"LƯU Ý: KHẤU TRỪ VƯỢT MỨC","Hợp lệ")))))',
+            )
+            for cc in range(13, 18):
+                c = ws2.cell(r, cc)
+                c.font = f_bold if cc == 17 else f_reg
+                c.border = b_thin
+                c.alignment = al_c if cc in (13, 16) else (al_r if cc in (14, 15) else al_l)
+
+        counts["rows_052"] = len(data_rows_2)
+        if tot_row_2 and data_rows_2:
+            r_first, r_last = data_rows_2[0], data_rows_2[-1]
+            for cc in (14, 15):
+                col_l = get_column_letter(cc)
+                c = ws2.cell(tot_row_2, cc, f"=SUM({col_l}{r_first}:{col_l}{r_last})")
+                c.number_format = NUM
+                c.alignment = al_r
+                c.font = f_bold
+                c.fill = fill_tot
+                c.border = b_thin
+            c_cnt = ws2.cell(tot_row_2, 17, f'=COUNTIF(Q{r_first}:Q{r_last},"<>Hợp lệ")&" dòng cảnh báo"')
+            c_cnt.font = f_bold
+            c_cnt.fill = fill_tot
+            c_cnt.alignment = al_c
+            c_cnt.border = b_thin
+            for cc in (13, 16):
+                ws2.cell(tot_row_2, cc).fill = fill_tot
+                ws2.cell(tot_row_2, cc).border = b_thin
+
+    return counts
+
+
 def export_yearly_tncn_with_audit(
     declarations: List[TaxDeclaration],
     out_dir: str,
@@ -583,8 +795,9 @@ def export_yearly_tncn_with_audit(
         # 1. Xuất đúng 4 sheet chuẩn mẫu tax_xml_to_excel: TK, 05-1, 05-2, 05-3
         write_single_year_tncn_file(out_path, d)
 
-        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 + gắn đối chiếu quỹ lương & rủi ro chi phí của ĐÚNG NĂM đó
+        # 2. Mở lại để đối chiếu trực tiếp NPT trên sheet 05-3 + gắn công thức test nhanh 05-1/05-2 + quỹ lương & rủi ro chi phí
         wb = openpyxl.load_workbook(out_path)
+        add_quick_test_formulas_051_052(wb, tax_year=d.year)
         if "05-3" in wb.sheetnames:
             stats_by_year[yr] = reconcile_053_inplace(wb, tms_rows, tax_year=d.year)
 
@@ -612,6 +825,7 @@ def reconcile_existing_tncn_excel(
     """Đối chiếu trực tiếp NPT trên sheet '05-3' của file Excel QTT_TNCN_YYYY.xlsx đã xuất sẵn."""
     tms_rows = parse_tms_npt_file(tms_npt_path)
     wb = openpyxl.load_workbook(excel_path)
+    add_quick_test_formulas_051_052(wb, tax_year=tax_year)
     stats = reconcile_053_inplace(wb, tms_rows, tax_year=tax_year)
     wb.save(excel_path)
     return stats

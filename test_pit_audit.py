@@ -583,6 +583,55 @@ class TestPitAuditPro(unittest.TestCase):
         res_c5_24, _ = audit_dependents([r053_c5_24], tms_case5, tax_year=2024)
         self.assertEqual(res_c5_24[0].valid_months, 0)
 
+    def test_quick_test_formulas_on_051_and_052(self) -> None:
+        """Kiểm thử gắn công thức test nhanh rủi ro khấu trừ / tính sai thuế TNCN trên 05-1 (X..AD) và 05-2 (M..Q)."""
+        from pit_workflow import add_quick_test_formulas_051_052
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "05-1"
+        ws1.cell(4, 1, 1)
+        ws1.cell(4, 2, "Nguyễn Văn A")
+        ws1.cell(4, 3, "8000000001")
+        ws1.cell(4, 6, "[x]")
+        ws1.cell(4, 8, 250_000_000)   # Tổng TNCT (H)
+        ws1.cell(4, 12, 1)            # Số NPT (L)
+        ws1.cell(4, 13, 184_800_000)  # GTGC (M)
+        ws1.cell(4, 15, 20_000_000)   # BH (O)
+        ws1.cell(4, 17, 45_200_000)   # TNTT (Q)
+        ws1.cell(4, 18, 2_260_000)    # Đã KT (R)
+        ws1.cell(4, 20, 2_260_000)    # Phải nộp (T)
+        ws1.cell(5, 1, "TỔNG CỘNG")
+
+        ws2 = wb.create_sheet("05-2")
+        ws2.cell(4, 1, 1)
+        ws2.cell(4, 2, "Trần CTV B")
+        ws2.cell(4, 3, "")            # Chưa có MST -> không đủ đk Cam kết 08
+        ws2.cell(4, 6, "[]")          # Cư trú 10%
+        ws2.cell(4, 7, 15_000_000)    # Tổng TNCT (G)
+        ws2.cell(4, 11, 0)            # Đã KT = 0 (K)
+        ws2.cell(5, 1, "TỔNG CỘNG")
+
+        cnt = add_quick_test_formulas_051_052(wb, tax_year=2024)
+        self.assertEqual(cnt["rows_051"], 1)
+        self.assertEqual(cnt["rows_052"], 1)
+        # 05-1: X4 (TNTT test), Z4 (7 bậc <=2025), AC4 (GTGC), AD4 (cảnh báo)
+        self.assertEqual(ws1["X4"].value, "=MAX(0,H4-J4-K4-M4-N4-O4-P4)")
+        self.assertIn("60000000", str(ws1["Z4"].value))
+        self.assertIn("132000000", str(ws1["AC4"].value))
+        self.assertIn("TÍNH SAI THUẾ", str(ws1["AD4"].value))
+        self.assertEqual(ws1["X5"].value, "=SUM(X4:X4)")
+        # 05-2: M4 (10%/20%), N4 (Thuế test), O4 (Thiếu), Q4 (Cảnh báo MST/Cam kết 08)
+        self.assertEqual(ws2["N4"].value, "=ROUND(MAX(0,G4-I4-J4)*M4,0)")
+        self.assertEqual(ws2["O4"].value, "=MAX(0,N4-K4)")
+        self.assertIn("CHƯA CÓ MST", str(ws2["Q4"].value))
+        self.assertEqual(ws2["O5"].value, "=SUM(O4:O4)")
+
+        # Kiểm tra năm 2026 tự động chuyển sang biểu 5 bậc & GTBT 186tr
+        add_quick_test_formulas_051_052(wb, tax_year=2026)
+        self.assertIn("120000000", str(ws1["Z4"].value))
+        self.assertIn("186000000", str(ws1["AC4"].value))
+
 
 if __name__ == "__main__":
     unittest.main()
